@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import LogoutButton from '@/components/LogoutButton';
+import ThemeToggle from '@/components/ThemeToggle';
 import { getCurrentUser } from '@/lib/auth';
 import { listTournaments } from '@/lib/tournaments';
 
@@ -21,7 +22,10 @@ export default async function TournamentsPage() {
           <p className="text-xs uppercase tracking-wide text-muted">Организатор</p>
           <h1 className="truncate text-xl font-bold">{user.displayName}</h1>
         </div>
-        <LogoutButton />
+        <div className="flex shrink-0 items-center gap-2">
+          <ThemeToggle />
+          <LogoutButton />
+        </div>
       </header>
 
       {tournaments.length === 0 ? (

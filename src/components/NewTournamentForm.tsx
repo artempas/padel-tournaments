@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import ThemeToggle from './ThemeToggle';
 import { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS, totalMatchesFor } from '@/lib/americano';
 
 function plural(n: number, one: string, few: string, many: string): string {
@@ -96,7 +97,8 @@ export default function NewTournamentForm() {
         >
           ←
         </Link>
-        <h1 className="text-xl font-bold">Новый турнир</h1>
+        <h1 className="min-w-0 flex-1 truncate text-xl font-bold">Новый турнир</h1>
+        <ThemeToggle />
       </header>
 
       <form onSubmit={submit} className="flex flex-col gap-5">

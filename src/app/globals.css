@@ -16,12 +16,30 @@
 }
 
 @layer base {
+  :root[data-theme='light'] {
+    --color-ink: #eef1f6;
+    --color-surface: #f9fafc;
+    --color-surface-2: #ffffff;
+    --color-line: #dbe1ea;
+    --color-text: #111826;
+    --color-muted: #5b6a84;
+    --color-accent: #5c7a1f;
+    --color-accent-ink: #f8fbec;
+    --color-court: #2563eb;
+    --color-warn: #b45309;
+  }
+
   html {
     /* Keep the layout out from under notches and home indicators. */
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
       env(safe-area-inset-left);
     background: var(--color-ink);
+    color-scheme: dark;
     -webkit-text-size-adjust: 100%;
+  }
+
+  html[data-theme='light'] {
+    color-scheme: light;
   }
 
   body {

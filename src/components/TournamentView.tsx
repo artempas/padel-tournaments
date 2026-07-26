@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
+import ThemeToggle from './ThemeToggle';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
@@ -98,6 +99,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             ←
           </Link>
           <h1 className="min-w-0 flex-1 truncate text-xl font-bold">{tournament.name}</h1>
+          <ThemeToggle />
         </div>
 
         <div className="flex items-center gap-3">
