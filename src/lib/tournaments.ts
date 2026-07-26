@@ -1,6 +1,8 @@
+import type { PoolClient } from 'pg';
 import { ApiError } from './api';
 import { query, queryOne, transaction } from './db';
 import { generateAmericano, MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS } from './americano';
+import { upsertRosterPlayers } from './roster';
 import type { Match, Player, TournamentDetail, TournamentSummary } from './types';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -12,6 +14,7 @@ interface TournamentRow {
   format: 'americano';
   points_per_match: number;
   status: 'running' | 'finished';
+  closed_manually: boolean;
   created_at: Date;
   finished_at: Date | null;
 }
@@ -102,17 +105,25 @@ export async function createTournament(
     );
     const tournamentId = tournament.rows[0].id;
 
+    // Everyone entered here joins the organiser's permanent roster, which is
+    // what makes cross-tournament totals possible.
+    const roster = await upsertRosterPlayers(client, ownerId, players);
+
     // Players are inserted in entry order, so seat N lines up with schedule index N.
-    const playerValues = players
-      .map((_, i) => `($1, $${i + 2}, ${i})`)
-      .join(', ');
-    const inserted = await client.query<{ id: string }>(
-      `INSERT INTO players (tournament_id, name, seat)
-       VALUES ${playerValues}
-       RETURNING id`,
-      [tournamentId, ...players],
+    const playerParams: unknown[] = [tournamentId];
+    const playerValues = players.map((name, i) => {
+      const base = playerParams.length;
+      playerParams.push(name, roster.get(name.toLocaleLowerCase('ru')) ?? null);
+      return `($1, $${base + 1}, ${i}, $${base + 2})`;
+    });
+    const inserted = await client.query<{ id: string; seat: number }>(
+      `INSERT INTO players (tournament_id, name, seat, roster_player_id)
+       VALUES ${playerValues.join(', ')}
+       RETURNING id, seat`,
+      playerParams,
     );
-    const ids = inserted.rows.map((r) => r.id);
+    // Sort by seat rather than trusting RETURNING to preserve VALUES order.
+    const ids = inserted.rows.sort((a, b) => a.seat - b.seat).map((r) => r.id);
 
     const params: unknown[] = [tournamentId];
     const rows = schedule.matches.map((m) => {
@@ -160,6 +171,7 @@ export async function listTournaments(ownerId: string): Promise<TournamentSummar
     format: r.format,
     pointsPerMatch: r.points_per_match,
     status: r.status,
+    closedEarly: r.closed_manually,
     createdAt: r.created_at.toISOString(),
     finishedAt: r.finished_at?.toISOString() ?? null,
     playerCount: Number(r.player_count),
@@ -198,6 +210,7 @@ export async function loadTournament(
     format: t.format,
     pointsPerMatch: t.points_per_match,
     status: t.status,
+    closedEarly: t.closed_manually,
     createdAt: t.created_at.toISOString(),
     finishedAt: t.finished_at?.toISOString() ?? null,
     players: players as Player[],
@@ -260,16 +273,51 @@ export async function setMatchScore(
     );
     if (updated.rowCount === 0) throw new ApiError('Матч не найден', 404);
 
-    // The tournament is finished exactly when no match is left unscored.
-    await client.query(
-      `UPDATE tournaments t
-          SET status = CASE WHEN remaining.count = 0 THEN 'finished' ELSE 'running' END,
-              finished_at = CASE WHEN remaining.count = 0 THEN now() ELSE NULL END
-         FROM (SELECT count(*) AS count FROM matches
-                WHERE tournament_id = $1 AND score1 IS NULL) AS remaining
-        WHERE t.id = $1`,
-      [tournamentId],
+    await refreshStatus(client, tournamentId);
+  });
+
+  return loadTournament(tournamentId, ownerId);
+}
+
+/**
+ * A tournament is finished when every match has a score, or when the organiser
+ * closed it by hand. `finished_at` is kept from the first time it finished, so
+ * correcting a score afterwards does not move the timestamp.
+ */
+async function refreshStatus(client: PoolClient, tournamentId: string): Promise<void> {
+  await client.query(
+    `UPDATE tournaments t
+        SET status = CASE WHEN done THEN 'finished' ELSE 'running' END,
+            finished_at = CASE WHEN done THEN coalesce(t.finished_at, now()) ELSE NULL END
+       FROM (
+         SELECT (t2.closed_manually
+                 OR NOT EXISTS (SELECT 1 FROM matches m
+                                 WHERE m.tournament_id = t2.id AND m.score1 IS NULL)) AS done
+           FROM tournaments t2 WHERE t2.id = $1
+       ) AS state
+      WHERE t.id = $1`,
+    [tournamentId],
+  );
+}
+
+/**
+ * Stop a tournament before every match is played, or resume a stopped one.
+ * Unplayed matches keep their empty score and simply stay out of the table.
+ */
+export async function setTournamentClosed(
+  tournamentId: string,
+  ownerId: string,
+  closed: boolean,
+): Promise<TournamentDetail> {
+  if (!UUID_RE.test(tournamentId)) throw new ApiError('Турнир не найден', 404);
+
+  await transaction(async (client) => {
+    const updated = await client.query(
+      'UPDATE tournaments SET closed_manually = $3 WHERE id = $1 AND owner_id = $2',
+      [tournamentId, ownerId, closed],
     );
+    if (updated.rowCount === 0) throw new ApiError('Турнир не найден', 404);
+    await refreshStatus(client, tournamentId);
   });
 
   return loadTournament(tournamentId, ownerId);

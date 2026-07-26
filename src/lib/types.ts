@@ -21,6 +21,8 @@ export interface Tournament {
   format: 'americano';
   pointsPerMatch: number;
   status: 'running' | 'finished';
+  /** Finished by the organiser rather than by playing every match. */
+  closedEarly: boolean;
   createdAt: string;
   finishedAt: string | null;
 }

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
 import ThemeToggle from './ThemeToggle';
+import { plural } from '@/lib/plural';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
@@ -22,6 +23,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmFinish, setConfirmFinish] = useState(false);
 
   const playersById = useMemo(
     () => new Map(tournament.players.map((p) => [p.id, p])),
@@ -44,7 +46,11 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
 
   const playedCount = tournament.matches.filter((m) => m.score1 !== null).length;
   const total = tournament.matches.length;
-  const allPlayed = playedCount === total && total > 0;
+  const remaining = total - playedCount;
+  const isFinished = tournament.status === 'finished';
+  // "Early" only while something is genuinely left unplayed — an organiser who
+  // closes early and then plays the rest ends up with an ordinary finish.
+  const finishedEarly = isFinished && remaining > 0;
   const currentRound =
     rounds.find(([, matches]) => matches.some((m) => m.score1 === null))?.[0] ?? null;
 
@@ -70,6 +76,30 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить счёт');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setClosed(closedEarly: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tournaments/${tournament.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ closedEarly }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? 'Не удалось изменить статус турнира');
+
+      const updated = data.tournament as TournamentDetail;
+      setTournament(updated);
+      setConfirmFinish(false);
+      setTab(updated.status === 'finished' ? 'table' : 'matches');
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось изменить статус турнира');
     } finally {
       setBusy(false);
     }
@@ -115,12 +145,29 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
         </div>
       </header>
 
-      {allPlayed && (
+      {isFinished && (
         <div className="mb-5 rounded-2xl border border-accent/50 bg-accent/10 px-4 py-3">
-          <p className="font-semibold text-accent">Турнир завершён 🏆</p>
-          <p className="mt-0.5 text-sm text-muted">
-            Победитель — {standings[0]?.name} ({standings[0]?.pointsFor} очков).
+          <p className="font-semibold text-accent">
+            {finishedEarly ? 'Турнир завершён досрочно 🏁' : 'Турнир завершён 🏆'}
           </p>
+          {playedCount > 0 ? (
+            <p className="mt-0.5 text-sm text-muted">
+              Победитель — {standings[0]?.name} ({standings[0]?.pointsFor} очков).
+              {remaining > 0 && ` Не сыграно ${remaining} ${plural(remaining, 'матч', 'матча', 'матчей')}.`}
+            </p>
+          ) : (
+            <p className="mt-0.5 text-sm text-muted">Ни одного матча не сыграно.</p>
+          )}
+          {tournament.closedEarly && remaining > 0 && (
+            <button
+              type="button"
+              onClick={() => setClosed(false)}
+              disabled={busy}
+              className="tap mt-3 w-full rounded-xl border border-accent/50 px-4 text-sm font-semibold text-accent disabled:opacity-40"
+            >
+              Продолжить турнир
+            </button>
+          )}
         </div>
       )}
 
@@ -235,6 +282,45 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
               </section>
             );
           })}
+
+          {!isFinished && remaining > 0 && (
+            <div className="pt-1">
+              {confirmFinish ? (
+                <div className="card p-4">
+                  <p className="mb-1 text-sm font-semibold">Завершить турнир досрочно?</p>
+                  <p className="mb-3 text-sm text-muted">
+                    {remaining} {plural(remaining, 'матч', 'матча', 'матчей')} останется без
+                    счёта — они не попадут в таблицу. Турнир можно будет продолжить.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setClosed(true)}
+                      disabled={busy}
+                      className="tap flex-1 rounded-xl bg-accent px-4 font-bold text-accent-ink disabled:opacity-40"
+                    >
+                      Завершить
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmFinish(false)}
+                      className="tap flex-1 rounded-xl border border-line px-4 font-medium text-muted"
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmFinish(true)}
+                  className="tap w-full rounded-xl border border-line px-4 text-sm font-medium text-muted"
+                >
+                  Завершить турнир досрочно
+                </button>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex flex-col gap-5">
@@ -251,7 +337,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                 <li
                   key={row.playerId}
                   className={`grid grid-cols-[2rem_1fr_3rem_2.5rem_3rem] items-center gap-2 px-3 py-3 ${
-                    allPlayed && index === 0 ? 'bg-accent/10' : ''
+                    isFinished && playedCount > 0 && index === 0 ? 'bg-accent/10' : ''
                   }`}
                 >
                   <span className="text-sm font-bold tabular-nums text-muted">{index + 1}</span>
@@ -272,6 +358,13 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             Очки — сумма всех очков, набранных игроком во всех его матчах. При равенстве выше тот,
             у кого лучше разница очков, затем — больше побед.
           </p>
+
+          <Link
+            href={`/tournaments/new?from=${tournament.id}`}
+            className="tap flex items-center justify-center rounded-xl bg-accent px-4 font-bold text-accent-ink"
+          >
+            Новый турнир с этим составом
+          </Link>
 
           <div className="pt-2">
             {confirmDelete ? (

@@ -5,22 +5,36 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ThemeToggle from './ThemeToggle';
 import { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS, totalMatchesFor } from '@/lib/americano';
+import { plural } from '@/lib/plural';
+import { randomTournamentName } from '@/lib/tournament-names';
+import type { RosterPlayer } from '@/lib/roster';
 
-function plural(n: number, one: string, few: string, many: string): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return one;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
-  return many;
+export interface NewTournamentFormProps {
+  /** Generated on the server so the first render matches the client. */
+  initialName: string;
+  initialPlayers?: string[];
+  initialCourts?: number;
+  initialPointsPerMatch?: number;
+  /** Everyone the organiser has entered before, for one-tap adding. */
+  roster?: RosterPlayer[];
+  /** Name of the tournament these players were copied from, if any. */
+  repeatedFrom?: string | null;
 }
 
-export default function NewTournamentForm() {
+export default function NewTournamentForm({
+  initialName,
+  initialPlayers = [],
+  initialCourts = 1,
+  initialPointsPerMatch = 16,
+  roster = [],
+  repeatedFrom = null,
+}: NewTournamentFormProps) {
   const router = useRouter();
-  const [name, setName] = useState('');
-  const [players, setPlayers] = useState<string[]>([]);
+  const [name, setName] = useState(initialName);
+  const [players, setPlayers] = useState<string[]>(initialPlayers);
   const [draft, setDraft] = useState('');
-  const [courts, setCourts] = useState(1);
-  const [pointsPerMatch, setPointsPerMatch] = useState(16);
+  const [courts, setCourts] = useState(initialCourts);
+  const [pointsPerMatch, setPointsPerMatch] = useState(initialPointsPerMatch);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +47,15 @@ export default function NewTournamentForm() {
     const matches = totalMatchesFor(players.length);
     return { matches, rounds: Math.ceil(matches / effectiveCourts) };
   }, [players.length, effectiveCourts]);
+
+  const chosen = useMemo(
+    () => new Set(players.map((p) => p.toLocaleLowerCase('ru'))),
+    [players],
+  );
+  const available = useMemo(
+    () => roster.filter((p) => !chosen.has(p.name.toLocaleLowerCase('ru'))),
+    [roster, chosen],
+  );
 
   function addPlayers(raw: string) {
     // One paste can carry a whole roster — split on commas and newlines.
@@ -101,17 +124,34 @@ export default function NewTournamentForm() {
         <ThemeToggle />
       </header>
 
+      {repeatedFrom && (
+        <p className="mb-5 rounded-xl border border-accent/40 bg-accent/10 px-4 py-3 text-sm">
+          Состав скопирован из турнира «{repeatedFrom}». Можно поправить перед стартом.
+        </p>
+      )}
+
       <form onSubmit={submit} className="flex flex-col gap-5">
         <section className="card p-4">
           <label className="flex flex-col gap-2">
             <span className="text-sm font-medium text-muted">Название</span>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Пятничный американо"
-              maxLength={80}
-              className="tap rounded-xl border border-line bg-ink px-4 text-text placeholder:text-muted/60 focus:border-accent focus:outline-none"
-            />
+            <div className="flex gap-2">
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Пятничный американо"
+                maxLength={80}
+                className="tap min-w-0 flex-1 rounded-xl border border-line bg-ink px-4 text-text placeholder:text-muted/60 focus:border-accent focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setName(randomTournamentName())}
+                className="tap w-14 shrink-0 rounded-xl border border-line text-lg"
+                aria-label="Придумать другое название"
+                title="Придумать другое название"
+              >
+                🎲
+              </button>
+            </div>
           </label>
         </section>
 
@@ -174,6 +214,34 @@ export default function NewTournamentForm() {
                 </li>
               ))}
             </ul>
+          )}
+
+          {available.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-2 flex items-baseline justify-between gap-2">
+                <p className="text-xs uppercase tracking-wide text-muted">Сохранённые игроки</p>
+                <button
+                  type="button"
+                  onClick={() => addPlayers(available.map((p) => p.name).join('\n'))}
+                  className="text-xs font-semibold text-accent"
+                >
+                  Добавить всех
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {available.map((person) => (
+                  <button
+                    key={person.id}
+                    type="button"
+                    onClick={() => addPlayers(person.name)}
+                    disabled={players.length >= MAX_PLAYERS}
+                    className="rounded-full border border-line bg-ink px-3 py-2 text-sm disabled:opacity-40"
+                  >
+                    + {person.name}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
 
           <p className="mt-3 text-xs leading-relaxed text-muted">

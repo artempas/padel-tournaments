@@ -67,6 +67,23 @@ CREATE TABLE IF NOT EXISTS tournaments (
 
 CREATE INDEX IF NOT EXISTS tournaments_owner_id_idx ON tournaments (owner_id, created_at DESC);
 
+-- Set when the organiser stops a tournament before every match is played.
+-- Without it, editing a score would recompute status back to 'running'.
+ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS closed_manually boolean NOT NULL DEFAULT false;
+
+-- The organiser's persistent roster. Tournament participants link back here so
+-- results can be totalled across every tournament a person took part in.
+CREATE TABLE IF NOT EXISTS roster_players (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        text NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Names are matched case-insensitively, so "Артём" and "артём" are one person.
+CREATE UNIQUE INDEX IF NOT EXISTS roster_players_owner_name_key
+  ON roster_players (owner_id, lower(name));
+
 CREATE TABLE IF NOT EXISTS players (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tournament_id  uuid NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -76,6 +93,13 @@ CREATE TABLE IF NOT EXISTS players (
 );
 
 CREATE INDEX IF NOT EXISTS players_tournament_id_idx ON players (tournament_id);
+
+-- Nullable and SET NULL on delete: removing someone from the roster must not
+-- erase the tournaments they already played.
+ALTER TABLE players ADD COLUMN IF NOT EXISTS roster_player_id uuid
+  REFERENCES roster_players(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS players_roster_player_id_idx ON players (roster_player_id);
 
 CREATE TABLE IF NOT EXISTS matches (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),

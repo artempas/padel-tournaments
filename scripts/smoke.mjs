@@ -141,6 +141,76 @@ try {
     assert.equal(m.score1, null);
   });
 
+  console.log('\nearly finish');
+  // Score two matches, then stop the tournament with the rest unplayed.
+  for (const m of detail.matches.slice(0, 2)) {
+    await api(`/api/tournaments/${id}/matches/${m.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ score1: 12, score2: 4 }),
+    });
+  }
+  const closed = await api(`/api/tournaments/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ closedEarly: true }),
+  });
+  check('tournament can be finished early', () => {
+    assert.equal(closed.status, 200);
+    assert.equal(closed.body.tournament.status, 'finished');
+    assert.equal(closed.body.tournament.closedEarly, true);
+    assert.ok(closed.body.tournament.finishedAt);
+  });
+  check('unplayed matches keep their empty score', () => {
+    const unplayed = closed.body.tournament.matches.filter((m) => m.score1 === null);
+    assert.equal(unplayed.length, 12);
+  });
+  check('the table counts only what was played', () => {
+    const total = closed.body.tournament.matches
+      .filter((m) => m.score1 !== null)
+      .reduce((sum, m) => sum + (m.score1 + m.score2) * 2, 0);
+    assert.equal(total, 2 * 16 * 2);
+  });
+
+  // The regression that motivates closed_manually: recomputing status after an
+  // edit must not silently reopen a tournament the organiser closed.
+  const editedWhileClosed = await api(
+    `/api/tournaments/${id}/matches/${detail.matches[0].id}`,
+    { method: 'PATCH', body: JSON.stringify({ score1: 9, score2: 7 }) },
+  );
+  check('editing a score does not reopen an early-finished tournament', () => {
+    assert.equal(editedWhileClosed.body.tournament.status, 'finished');
+    assert.equal(editedWhileClosed.body.tournament.closedEarly, true);
+  });
+
+  const listed = (await api('/api/tournaments')).body.tournaments.find((t) => t.id === id);
+  check('the list reports it as finished early', () => {
+    assert.equal(listed.status, 'finished');
+    assert.equal(listed.closedEarly, true);
+  });
+
+  const reopened = await api(`/api/tournaments/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ closedEarly: false }),
+  });
+  check('an early-finished tournament can be resumed', () => {
+    assert.equal(reopened.body.tournament.status, 'running');
+    assert.equal(reopened.body.tournament.closedEarly, false);
+    assert.equal(reopened.body.tournament.finishedAt, null);
+  });
+
+  const badClose = await api(`/api/tournaments/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ closedEarly: 'yes' }),
+  });
+  check('closedEarly must be a boolean', () => assert.equal(badClose.status, 400));
+
+  // Reset so the completion checks below start from a clean slate.
+  for (const m of detail.matches.slice(0, 2)) {
+    await api(`/api/tournaments/${id}/matches/${m.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ score1: null, score2: null }),
+    });
+  }
+
   console.log('\ncompletion');
   let last;
   for (const [index, match] of detail.matches.entries()) {
@@ -159,6 +229,88 @@ try {
     const total = detail.matches.reduce((sum, m) => sum + (m.score1 + m.score2) * 2, 0);
     assert.equal(total, 14 * 16 * 2);
   });
+
+  console.log('\nroster');
+  const roster = (await api('/api/roster')).body.players;
+  check('every entered player is saved to the roster', () =>
+    assert.equal(roster.length, players.length));
+  check('roster names match what was entered', () =>
+    assert.deepEqual([...roster.map((p) => p.name)].sort(), [...players].sort()));
+
+  check('roster totals equal the tournament totals', () => {
+    const total = roster.reduce((sum, p) => sum + p.pointsFor, 0);
+    assert.equal(total, 14 * 16 * 2);
+  });
+  check('each player has 7 matches in 1 tournament', () => {
+    for (const p of roster) {
+      assert.equal(p.matches, 7, `${p.name} has ${p.matches} matches`);
+      assert.equal(p.tournaments, 1);
+    }
+  });
+
+  console.log('\nrepeat with the same players');
+  const repeat = await api('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Second run', players, courts: 2, pointsPerMatch: 16 }),
+  });
+  check('second tournament created', () => assert.equal(repeat.status, 201));
+  const secondId = repeat.body.id;
+
+  const afterRepeat = (await api('/api/roster')).body.players;
+  check('the same names do not duplicate the roster', () =>
+    assert.equal(afterRepeat.length, players.length));
+  check('roster ids are stable across tournaments', () =>
+    assert.deepEqual(
+      afterRepeat.map((p) => p.id).sort(),
+      roster.map((p) => p.id).sort(),
+    ));
+
+  const second = (await api(`/api/tournaments/${secondId}`)).body.tournament;
+  for (const m of second.matches) {
+    await api(`/api/tournaments/${secondId}/matches/${m.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ score1: 10, score2: 6 }),
+    });
+  }
+  const cumulative = (await api('/api/roster')).body.players;
+  check('points accumulate across tournaments', () => {
+    const total = cumulative.reduce((sum, p) => sum + p.pointsFor, 0);
+    assert.equal(total, 14 * 16 * 2 * 2);
+  });
+  check('tournament count rises to 2', () => {
+    for (const p of cumulative) assert.equal(p.tournaments, 2, `${p.name}: ${p.tournaments}`);
+  });
+
+  console.log('\ncase-insensitive matching');
+  const shouted = await api('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Case test',
+      players: players.map((p) => p.toUpperCase()),
+      courts: 2,
+    }),
+  });
+  check('a tournament with differently-cased names is accepted', () =>
+    assert.equal(shouted.status, 201));
+  const afterCase = (await api('/api/roster')).body.players;
+  check('roster still holds one entry per person', () =>
+    assert.equal(afterCase.length, players.length));
+
+  console.log('\nroster deletion');
+  const victim = afterCase[0];
+  const removedPlayer = await api(`/api/roster/${victim.id}`, { method: 'DELETE' });
+  check('roster player deleted', () => assert.equal(removedPlayer.status, 200));
+  const afterDelete = (await api('/api/roster')).body.players;
+  check('player is gone from the roster', () =>
+    assert.equal(afterDelete.length, players.length - 1));
+  const survivingTournament = (await api(`/api/tournaments/${secondId}`)).body.tournament;
+  check('deleting a roster player keeps played tournaments intact', () => {
+    assert.equal(survivingTournament.players.length, players.length);
+    assert.equal(survivingTournament.matches.filter((m) => m.score1 !== null).length, 14);
+  });
+
+  await api(`/api/tournaments/${secondId}`, { method: 'DELETE' });
+  await api(`/api/tournaments/${shouted.body.id}`, { method: 'DELETE' });
 
   console.log('\nisolation');
   const otherUser = await client.query(

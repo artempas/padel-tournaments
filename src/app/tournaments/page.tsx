@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import LogoutButton from '@/components/LogoutButton';
 import ThemeToggle from '@/components/ThemeToggle';
 import { getCurrentUser } from '@/lib/auth';
+import { listRoster } from '@/lib/roster';
 import { listTournaments } from '@/lib/tournaments';
 
 export const dynamic = 'force-dynamic';
@@ -13,7 +14,11 @@ export default async function TournamentsPage() {
   const user = await getCurrentUser();
   if (!user) redirect('/');
 
-  const tournaments = await listTournaments(user.id);
+  const [tournaments, roster] = await Promise.all([
+    listTournaments(user.id),
+    listRoster(user.id),
+  ]);
+  const rosterSize = roster.length;
 
   return (
     <main className="mx-auto w-full max-w-2xl px-4 pb-28 pt-6 sm:px-6">
@@ -27,6 +32,22 @@ export default async function TournamentsPage() {
           <LogoutButton />
         </div>
       </header>
+
+      {rosterSize > 0 && (
+        <Link
+          href="/players"
+          className="card mb-4 flex items-center gap-3 p-4 transition active:scale-[0.99]"
+        >
+          <span className="text-2xl">👥</span>
+          <span className="min-w-0 flex-1">
+            <span className="block font-semibold">Игроки</span>
+            <span className="block text-sm text-muted">
+              {rosterSize} сохранено · общий счёт по всем турнирам
+            </span>
+          </span>
+          <span className="shrink-0 text-muted">→</span>
+        </Link>
+      )}
 
       {tournaments.length === 0 ? (
         <div className="card px-5 py-12 text-center">
@@ -52,7 +73,11 @@ export default async function TournamentsPage() {
                           : 'bg-surface-2 text-muted'
                       }`}
                     >
-                      {t.status === 'finished' ? 'Завершён' : 'Идёт'}
+                      {t.status !== 'finished'
+                        ? 'Идёт'
+                        : t.playedCount < t.matchCount
+                          ? 'Завершён досрочно'
+                          : 'Завершён'}
                     </span>
                   </div>
 
