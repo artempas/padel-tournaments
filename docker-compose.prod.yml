@@ -1,0 +1,37 @@
+# Production stack for Synology Container Manager.
+# Values come from a `.env` file sitting next to this one — copy
+# .env.production.example to .env and fill it in.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: padel-tournaments:latest
+    container_name: padel-app
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      RP_ID: ${RP_ID:?set RP_ID in .env}
+      ORIGIN: ${ORIGIN:?set ORIGIN in .env}
+      RP_NAME: ${RP_NAME:-Padel Tournaments}
+    # Lets the container reach a Postgres that publishes a port on the NAS
+    # itself, via host.docker.internal.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+# If your Postgres runs in Docker on its own network, join it instead of using
+# host.docker.internal: uncomment below, put the real network name in, add
+#   networks: [default, pgnet]
+# to the app service, and point DATABASE_URL at the Postgres container name.
+#
+# networks:
+#   pgnet:
+#     external: true
+#     name: your-postgres-network

@@ -14,13 +14,20 @@ function createPool(): Pool {
   return new Pool({ connectionString, max: 10 });
 }
 
-export const pool: Pool = globalThis.__padelPool ?? (globalThis.__padelPool = createPool());
+/**
+ * Created on first use, not at import time: `next build` loads every route
+ * module to collect metadata, and it must not need a reachable database.
+ */
+export function getPool(): Pool {
+  if (!globalThis.__padelPool) globalThis.__padelPool = createPool();
+  return globalThis.__padelPool;
+}
 
 export async function query<T extends QueryResultRow>(
   text: string,
   params?: unknown[],
 ): Promise<T[]> {
-  const result = await pool.query<T>(text, params as never[]);
+  const result = await getPool().query<T>(text, params as never[]);
   return result.rows;
 }
 
@@ -34,7 +41,7 @@ export async function queryOne<T extends QueryResultRow>(
 
 /** Run `fn` inside a transaction, rolling back on any throw. */
 export async function transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
+  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     const result = await fn(client);
