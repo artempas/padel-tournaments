@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: padel-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: padel
+      POSTGRES_PASSWORD: padel
+      POSTGRES_DB: padel
+    ports:
+      - '5433:5432'
+    volumes:
+      - padel-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U padel -d padel']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  padel-pgdata:

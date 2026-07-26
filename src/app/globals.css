@@ -1,0 +1,60 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-ink: #070c16;
+  --color-surface: #101a2c;
+  --color-surface-2: #16233a;
+  --color-line: #24344f;
+  --color-text: #e9f0fa;
+  --color-muted: #8ba0c0;
+  --color-accent: #c6f24e;
+  --color-accent-ink: #16230a;
+  --color-court: #2f7de1;
+  --color-warn: #ffb340;
+
+  --radius-card: 1rem;
+}
+
+@layer base {
+  html {
+    /* Keep the layout out from under notches and home indicators. */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+      env(safe-area-inset-left);
+    background: var(--color-ink);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--color-ink);
+    color: var(--color-text);
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100dvh;
+    overscroll-behavior-y: none;
+  }
+
+  /* Every control is a comfortable thumb target on a phone. */
+  button,
+  [role='button'] {
+    touch-action: manipulation;
+  }
+
+  input,
+  select {
+    font-size: 16px; /* stops iOS Safari zooming on focus */
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-accent-ink);
+  }
+}
+
+@utility tap {
+  min-height: 2.75rem;
+}
+
+@utility card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-card);
+}
