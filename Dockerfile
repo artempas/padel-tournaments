@@ -3,7 +3,9 @@
 # ---- dependencies -----------------------------------------------------------
 FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json prisma.config.ts ./
+# postinstall = `prisma generate`, поэтому схема нужна уже на этом шаге.
+COPY prisma ./prisma
 RUN npm ci
 
 # ---- build ------------------------------------------------------------------
