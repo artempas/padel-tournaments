@@ -8,6 +8,7 @@ import {
   startRegistration,
 } from '@simplewebauthn/browser';
 import ThemeToggle from './ThemeToggle';
+import { failureMessage, request } from '@/lib/request';
 
 type Mode = 'login' | 'register';
 
@@ -16,20 +17,12 @@ function friendlyError(err: unknown): string {
     if (err.name === 'NotAllowedError') return 'Вход отменён или истекло время ожидания';
     if (err.name === 'InvalidStateError') return 'Passkey для этого устройства уже создан';
     if (err.name === 'SecurityError') return 'Домен не разрешён для passkey — проверьте RP_ID';
-    return err.message;
   }
-  return 'Что-то пошло не так';
+  return failureMessage(err, 'Что-то пошло не так', 'Нет сети — вход требует связи с сервером');
 }
 
-async function postJson<T>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? 'Ошибка запроса');
-  return data as T;
+function postJson<T>(url: string, body?: unknown): Promise<T> {
+  return request<T>(url, { method: 'POST', body: JSON.stringify(body ?? {}) });
 }
 
 export default function AuthScreen() {

@@ -4,6 +4,8 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ThemeToggle from './ThemeToggle';
+import { useOptimisticState } from '@/lib/optimistic';
+import { request } from '@/lib/request';
 import type { RosterStat } from '@/lib/roster';
 
 type Sort = 'points' | 'matches' | 'name';
@@ -23,11 +25,10 @@ const dateFormat = new Intl.DateTimeFormat('ru-RU', {
 
 export default function RosterView({ initial }: { initial: RosterStat[] }) {
   const router = useRouter();
-  const [players, setPlayers] = useState(initial);
+  const { value: players, error, mutate } = useOptimisticState(initial);
   const [sort, setSort] = useState<Sort>('points');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const sorted = useMemo(() => {
     const copy = [...players];
@@ -38,17 +39,22 @@ export default function RosterView({ initial }: { initial: RosterStat[] }) {
     return copy;
   }, [players, sort]);
 
-  async function remove(id: string) {
-    setError(null);
-    const res = await fetch(`/api/roster/${id}`, { method: 'DELETE' });
-    if (res.ok) {
-      setPlayers((current) => current.filter((p) => p.id !== id));
-      setPendingDelete(null);
-      setExpandedId(null);
-      router.refresh();
-    } else {
-      setError('Не удалось удалить игрока');
-    }
+  /** Строка пропадает по клику; если сервер откажет, игрок вернётся на место. */
+  function remove(person: RosterStat) {
+    setPendingDelete(null);
+    setExpandedId(null);
+
+    mutate({
+      next: (list) => list.filter((p) => p.id !== person.id),
+      // Место в списке задаёт сортировка, так что возвращать в конец достаточно.
+      undo: (list) => (list.some((p) => p.id === person.id) ? list : [...list, person]),
+      send: async () => {
+        await request(`/api/roster/${person.id}`, { method: 'DELETE' });
+        router.refresh();
+      },
+      message: 'Не удалось убрать игрока из списка',
+      offline: 'Нет сети — убрать игрока можно только со связью',
+    });
   }
 
   const totals = useMemo(
@@ -203,7 +209,7 @@ export default function RosterView({ initial }: { initial: RosterStat[] }) {
                           <div className="mt-3 flex gap-2">
                             <button
                               type="button"
-                              onClick={() => remove(person.id)}
+                              onClick={() => remove(person)}
                               className="tap flex-1 rounded-xl bg-warn px-4 text-sm font-bold text-ink"
                             >
                               Убрать из списка

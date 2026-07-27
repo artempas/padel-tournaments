@@ -7,7 +7,8 @@ interface Props {
   match: Match;
   playersById: Map<string, Player>;
   pointsPerMatch: number;
-  busy: boolean;
+  /** Счёт сохраняется в очередь, а не на сервер, поэтому шторка не ждёт: она
+   *  закрывается тем же кликом, каким уходит запрос. */
   onSave: (score1: number, score2: number) => void;
   onClear: () => void;
   onClose: () => void;
@@ -21,7 +22,6 @@ export default function ScoreSheet({
   match,
   playersById,
   pointsPerMatch,
-  busy,
   onSave,
   onClear,
   onClose,
@@ -134,18 +134,16 @@ export default function ScoreSheet({
         <div className="mt-5 flex flex-col gap-2">
           <button
             type="button"
-            disabled={busy}
             onClick={() => onSave(score1, score2)}
-            className="tap rounded-xl bg-accent px-4 font-bold text-accent-ink disabled:opacity-40"
+            className="tap rounded-xl bg-accent px-4 font-bold text-accent-ink"
           >
-            {busy ? 'Сохраняем…' : 'Сохранить счёт'}
+            Сохранить счёт
           </button>
           {match.score1 !== null && (
             <button
               type="button"
-              disabled={busy}
               onClick={onClear}
-              className="tap rounded-xl border border-line px-4 font-medium text-muted disabled:opacity-40"
+              className="tap rounded-xl border border-line px-4 font-medium text-muted"
             >
               Сбросить результат
             </button>
