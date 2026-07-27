@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Нет сети — Падел Турниры</title>
+    <!--
+      Deliberately a plain file rather than a Next route: the service worker
+      serves it when a page has never been opened on this device and there is no
+      connection. A React page would need its own JS chunks, and those are
+      exactly what cannot be fetched at that moment.
+    -->
+    <style>
+      :root {
+        --ink: #070c16;
+        --text: #e9f0fa;
+        --muted: #8ba0c0;
+        --accent: #c6f24e;
+        --accent-ink: #16230a;
+        color-scheme: dark;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --ink: #eef1f6;
+          --text: #111826;
+          --muted: #5b6a84;
+          --accent: #5c7a1f;
+          --accent-ink: #f8fbec;
+          color-scheme: light;
+        }
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 1.5rem;
+        background: var(--ink);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        text-align: center;
+      }
+      main {
+        margin: 0 auto;
+        max-width: 26rem;
+      }
+      .mark {
+        font-size: 3rem;
+        margin: 0 0 0.75rem;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin: 0 0 0.5rem;
+      }
+      p {
+        margin: 0 0 1.5rem;
+        font-size: 0.875rem;
+        line-height: 1.6;
+        color: var(--muted);
+      }
+      a {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 2.75rem;
+        border-radius: 0.75rem;
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-weight: 700;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="mark">📵</p>
+      <h1>Нет сети</h1>
+      <p>
+        Эта страница ещё не открывалась на устройстве, поэтому показать нечего. Турниры,
+        которые вы открывали раньше, доступны и без сети, а внесённый счёт сохраняется на
+        устройстве и уходит на сервер сам, когда связь возвращается.
+      </p>
+      <a href="/tournaments">К турнирам</a>
+    </main>
+  </body>
+</html>

@@ -16,7 +16,8 @@
     "db:studio": "prisma studio",
     "test": "node --test \"tests/**/*.test.ts\"",
     "smoke": "node --env-file=.env.local scripts/smoke.mjs",
-    "seed:demo": "node --env-file=.env.local scripts/seed-demo.mjs"
+    "seed:demo": "node --env-file=.env.local scripts/seed-demo.mjs",
+    "icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",

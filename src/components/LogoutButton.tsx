@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import { purgeOfflineData } from '@/lib/offline';
 
 export default function LogoutButton() {
   const router = useRouter();
@@ -14,6 +15,8 @@ export default function LogoutButton() {
       onClick={async () => {
         setBusy(true);
         await fetch('/api/auth/logout', { method: 'POST' });
+        // Queued scores and cached pages belong to the account that is leaving.
+        await purgeOfflineData().catch(() => {});
         router.replace('/');
         router.refresh();
       }}
