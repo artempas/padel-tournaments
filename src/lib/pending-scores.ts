@@ -1,4 +1,4 @@
-import type { TournamentDetail } from './types';
+import type { Match, TournamentDetail } from './types';
 
 /** A score entered on the phone that the server has not accepted yet. */
 export interface PendingScore {
@@ -9,6 +9,28 @@ export interface PendingScore {
   score2: number | null;
   /** `Date.now()` at the moment of entry — decides who wins for one match. */
   queuedAt: number;
+}
+
+/**
+ * Доигран ли турнир целиком — то же правило, что во вью tournament_overview.
+ *
+ * «Все известные матчи сыграны» — не то же самое, что «турнир окончен»: у
+ * мексикано следующий раунд собирает сервер, и до синхронизации его матчей на
+ * устройстве просто нет. Без проверки длины последний счёт каждого раунда
+ * объявлял бы турнир завершённым.
+ *
+ * Матчи передаются отдельно, потому что решение принимается по состоянию на
+ * экране — с наложенной очередью, — а не по тому, что подтвердил сервер.
+ */
+export function isComplete(
+  tournament: Pick<TournamentDetail, 'roundsPlanned'>,
+  matches: Match[],
+): boolean {
+  const builtRounds = matches.reduce((max, m) => Math.max(max, m.round), 0);
+  return (
+    matches.every((m) => m.score1 !== null) &&
+    (tournament.roundsPlanned === null || builtRounds >= tournament.roundsPlanned)
+  );
 }
 
 /**
@@ -37,16 +59,7 @@ export function applyPendingScores(
     return entry ? { ...match, score1: entry.score1, score2: entry.score2 } : match;
   });
 
-  // «Все известные матчи сыграны» — не то же самое, что «турнир окончен»:
-  // у мексикано следующий раунд собирает сервер, и до синхронизации его
-  // матчей на устройстве просто нет. Иначе последний счёт каждого раунда
-  // объявлял бы турнир завершённым.
-  const builtRounds = matches.reduce((max, m) => Math.max(max, m.round), 0);
-  const complete =
-    matches.every((m) => m.score1 !== null) &&
-    (tournament.roundsPlanned === null || builtRounds >= tournament.roundsPlanned);
-
-  const done = tournament.closedEarly || complete;
+  const done = tournament.closedEarly || isComplete(tournament, matches);
 
   return {
     ...tournament,

@@ -8,7 +8,7 @@ import ThemeToggle from './ThemeToggle';
 import { formatLabel, tournamentSize } from '@/lib/formats';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
 import { useOptimisticState } from '@/lib/optimistic';
-import { applyPendingScores, type PendingScore } from '@/lib/pending-scores';
+import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending-scores';
 import { plural } from '@/lib/plural';
 import { failureMessage, request } from '@/lib/request';
 import { computeStandings, restingInRound } from '@/lib/standings';
@@ -171,13 +171,11 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
     const before = server;
 
     setConfirmFinish(false);
-    setTab(
-      closedEarly || tournament.matches.every((m) => m.score1 !== null) ? 'table' : 'matches',
-    );
+    setTab(closedEarly || isComplete(tournament, tournament.matches) ? 'table' : 'matches');
 
     mutate({
       next: (t) => {
-        const finished = closedEarly || t.matches.every((m) => m.score1 !== null);
+        const finished = closedEarly || isComplete(t, t.matches);
         return {
           ...t,
           closedEarly,
@@ -517,7 +515,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
           <p className="text-xs leading-relaxed text-muted">
             Очки — сумма всех очков, набранных игроком во всех его матчах. При равенстве выше тот,
             у кого лучше разница очков, затем — больше побед.
-            {tournament.format === 'mexicano' &&
+            {tournament.format === 'mexicano' && !isFinished &&
               ' По этому же порядку собирается следующий раунд: первая четвёрка играет на первом' +
                 ' корте, первый с четвёртым против второго с третьим.'}
           </p>
