@@ -14,11 +14,14 @@ export interface Match {
   score2: number | null;
 }
 
+/** Пока генератор есть только у американо, но схема допускает и остальные. */
+export type TournamentFormat = 'americano' | 'mexicano' | 'team_americano';
+
 export interface Tournament {
   id: string;
   name: string;
   courts: number;
-  format: 'americano';
+  format: TournamentFormat;
   pointsPerMatch: number;
   status: 'running' | 'finished';
   /** Finished by the organiser rather than by playing every match. */

@@ -1,7 +1,7 @@
 import { verifyAuthenticationResponse } from '@simplewebauthn/server';
 import type { AuthenticationResponseJSON, AuthenticatorTransportFuture } from '@simplewebauthn/server';
 import { ApiError, json, readJson, route } from '@/lib/api';
-import { queryOne } from '@/lib/db';
+import { prisma } from '@/lib/prisma';
 import {
   consumeChallenge,
   findCredential,
@@ -51,15 +51,13 @@ export const POST = route(async (request: Request) => {
 
   await updateCredentialCounter(stored.id, verification.authenticationInfo.newCounter);
 
-  const user = await queryOne<{ id: string; username: string; display_name: string }>(
-    'SELECT id, username, display_name FROM users WHERE id = $1',
-    [stored.userId],
-  );
+  const user = await prisma.user.findUnique({
+    where: { id: stored.userId },
+    select: { id: true, username: true, displayName: true },
+  });
   if (!user) throw new ApiError('Пользователь не найден', 404);
 
   await createSession(user.id);
 
-  return json({
-    user: { id: user.id, username: user.username, displayName: user.display_name },
-  });
+  return json({ user });
 });

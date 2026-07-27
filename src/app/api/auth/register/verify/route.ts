@@ -1,7 +1,8 @@
 import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import { ApiError, json, readJson, route } from '@/lib/api';
-import { transaction } from '@/lib/db';
+import { normalizeKey } from '@/lib/normalize';
+import { prisma } from '@/lib/prisma';
 import { consumeChallenge, relyingParty } from '@/lib/webauthn';
 import { createSession } from '@/lib/auth';
 
@@ -34,37 +35,37 @@ export const POST = route(async (request: Request) => {
 
   const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
 
-  const user = await transaction(async (client) => {
-    const inserted = await client.query<{ id: string; username: string; display_name: string }>(
-      `INSERT INTO users (id, username, display_name)
-       VALUES ($1, $2, $2)
-       ON CONFLICT DO NOTHING
-       RETURNING id, username, display_name`,
-      [pending.userHandle, pending.username],
-    );
-
-    if (inserted.rowCount === 0) throw new ApiError('Такое имя уже занято', 409);
-
-    await client.query(
-      `INSERT INTO credentials (id, user_id, public_key, counter, transports, device_type, backed_up)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        credential.id,
-        pending.userHandle,
-        Buffer.from(credential.publicKey),
-        credential.counter,
-        credential.transports ?? [],
-        credentialDeviceType,
-        credentialBackedUp,
-      ],
-    );
-
-    return inserted.rows[0];
-  });
+  // Вложенный create — одна транзакция: пользователь без passkey не появится,
+  // даже если вторая вставка упадёт. Занятое имя ловим по нарушению
+  // уникальности usernameKey, а не отдельной проверкой перед вставкой.
+  const user = await prisma.user
+    .create({
+      data: {
+        id: pending.userHandle,
+        username: pending.username,
+        usernameKey: normalizeKey(pending.username),
+        displayName: pending.username,
+        credentials: {
+          create: {
+            id: credential.id,
+            publicKey: Buffer.from(credential.publicKey),
+            counter: BigInt(credential.counter),
+            transports: credential.transports ?? [],
+            deviceType: credentialDeviceType,
+            backedUp: credentialBackedUp,
+          },
+        },
+      },
+      select: { id: true, username: true, displayName: true },
+    })
+    .catch((err: unknown) => {
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'P2002') {
+        throw new ApiError('Такое имя уже занято', 409);
+      }
+      throw err;
+    });
 
   await createSession(user.id);
 
-  return json({
-    user: { id: user.id, username: user.username, displayName: user.display_name },
-  });
+  return json({ user });
 });

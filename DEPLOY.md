@@ -174,11 +174,26 @@ RP_NAME=Падел Турниры
 В **Container Manager → Контейнер → padel-app → Журнал** должно быть:
 
 ```
-Applying database schema...
-Schema applied to postgres://***@host.docker.internal:5432/padel
+Applying migration `20260727000000_schema_v2`
+All migrations have been successfully applied.
 Starting Padel Tournaments on port 3000 (RP_ID=padel.artem.synology.me, ORIGIN=https://padel.artem.synology.me)
  ✓ Ready in 243ms
 ```
+
+> **Первое обновление на схему v2.** Если база уже работала со схемой v1, её
+> надо один раз пометить как размеченную, иначе миграция попытается создать
+> уже существующие таблицы:
+>
+> ```bash
+> docker exec padel-app node ./node_modules/prisma/build/index.js \
+>   migrate resolve --applied 20260726000000_baseline_v1
+> ```
+>
+> После этого обычный старт контейнера сам применит миграцию v2 и перенесёт
+> данные. Она выполняется одной транзакцией и начинается с проверок: если
+> накопленные данные не проходят новые ограничения, миграция откатится
+> целиком с понятным сообщением, а база останется в состоянии v1.
+> **Сделайте бэкап перед первым запуском.**
 
 Откройте `https://padel.artem.synology.me` с телефона, зарегистрируйтесь по
 passkey и создайте турнир. Телефон предложит Face ID, отпечаток или PIN.

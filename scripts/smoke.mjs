@@ -29,15 +29,16 @@ await client.connect();
 
 const username = `smoke-${Date.now()}`;
 const { rows } = await client.query(
-  'INSERT INTO users (username, display_name) VALUES ($1, $1) RETURNING id',
+  'INSERT INTO users (username, username_key, display_name) VALUES ($1, $1, $1) RETURNING id',
   [username],
 );
 const userId = rows[0].id;
 
 const token = randomBytes(32).toString('base64url');
+// token_hash — bytea, поэтому digest() без 'hex'.
 await client.query(
   "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')",
-  [createHash('sha256').update(token).digest('hex'), userId],
+  [createHash('sha256').update(token).digest(), userId],
 );
 
 const cookie = `padel_session=${token}`;
@@ -314,13 +315,13 @@ try {
 
   console.log('\nisolation');
   const otherUser = await client.query(
-    'INSERT INTO users (username, display_name) VALUES ($1, $1) RETURNING id',
+    'INSERT INTO users (username, username_key, display_name) VALUES ($1, $1, $1) RETURNING id',
     [`${username}-other`],
   );
   const otherToken = randomBytes(32).toString('base64url');
   await client.query(
     "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')",
-    [createHash('sha256').update(otherToken).digest('hex'), otherUser.rows[0].id],
+    [createHash('sha256').update(otherToken).digest(), otherUser.rows[0].id],
   );
   const foreign = await fetch(`${BASE}/api/tournaments/${id}`, {
     headers: { cookie: `padel_session=${otherToken}` },
@@ -334,7 +335,11 @@ try {
   const gone = await api(`/api/tournaments/${id}`);
   check('deleted tournament is gone', () => assert.equal(gone.status, 404));
 
-  await client.query('DELETE FROM users WHERE id = ANY($1)', [[userId, otherUser.rows[0].id]]);
+  // Турниры сносим первыми: tournament_players держит people через RESTRICT,
+  // и при удалении пользователя порядок каскадов не определён.
+  const accounts = [userId, otherUser.rows[0].id];
+  await client.query('DELETE FROM tournaments WHERE owner_id = ANY($1)', [accounts]);
+  await client.query('DELETE FROM users WHERE id = ANY($1)', [accounts]);
 } finally {
   await client.end();
 }

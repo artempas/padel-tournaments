@@ -1,0 +1,274 @@
+// Padel Tournaments — схема v2.
+//
+// Здесь описано только то, что Prisma умеет моделировать: таблицы, связи,
+// индексы и перечисления. Ограничения, которые Prisma не знает совсем —
+// CHECK, отложенные триггеры и вью — лежат в SQL миграций.
+//
+// Граница проведена так намеренно: индексами и внешними ключами владеет
+// Prisma (иначе `migrate dev` посчитает их дрейфом и снесёт), а всем, чего
+// в её языке нет, — миграции. Пересечения нет, значит нет и конфликта.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TournamentFormat {
+  americano
+  mexicano
+  team_americano
+
+  @@map("tournament_format")
+}
+
+enum MatchSide {
+  a
+  b
+
+  @@map("match_side")
+}
+
+enum ChallengeKind {
+  registration
+  authentication
+
+  @@map("challenge_kind")
+}
+
+// ============================================================================
+// Аккаунты и вход
+// ============================================================================
+
+model User {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  // Имя как ввёл пользователь, плюс нормализованный ключ для уникальности.
+  // В v1 регистронезависимость держалась на `lower()` в SQL и на
+  // toLocaleLowerCase('ru') в JS — две разные функции на один инвариант.
+  // Теперь нормализует только TS (см. lib/normalize.ts), а база хранит
+  // результат, поэтому разойтись им негде.
+  username    String @db.Text
+  usernameKey String @unique @map("username_key") @db.Text
+
+  displayName String @map("display_name") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  credentials Credential[]
+  sessions    Session[]
+  challenges  WebauthnChallenge[]
+  tournaments Tournament[]
+  roster      Person[]            @relation("PersonOwner")
+  linkedTo    Person[]            @relation("PersonAccount")
+
+  @@map("users")
+}
+
+model Credential {
+  id     String @id @db.Text // base64url credential ID
+  userId String @map("user_id") @db.Uuid
+
+  publicKey  Bytes    @map("public_key")
+  counter    BigInt   @default(0)
+  transports String[] @db.Text
+  deviceType String?  @map("device_type") @db.Text
+  backedUp   Boolean  @default(false) @map("backed_up")
+  // Подпись от пользователя: «iPhone», «Рабочий ноут».
+  label      String?  @db.Text
+
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("credentials")
+}
+
+model WebauthnChallenge {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  challenge String        @db.Text
+  kind      ChallengeKind
+  userId    String?       @map("user_id") @db.Uuid
+  username  String?       @db.Text
+  // Зарезервированный user handle: станет users.id, если регистрация дойдёт
+  // до конца, чтобы handle аутентификатора совпадал с нашим id.
+  userHandle String? @map("user_handle") @db.Uuid
+
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+  @@map("webauthn_challenges")
+}
+
+model Session {
+  // sha256 значения из cookie: утечка дампа не даёт валидную сессию.
+  tokenHash Bytes  @id @map("token_hash")
+  userId    String @map("user_id") @db.Uuid
+
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt DateTime @default(now()) @map("last_used_at") @db.Timestamptz(6)
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ============================================================================
+// Люди
+//
+// Единственное место, где живёт имя человека: участник турнира ссылается
+// сюда, копии имени нет. Удаления нет — onDelete: Restrict плюс archivedAt,
+// поэтому «удалить из ростера» значит заархивировать, а история цела.
+// ============================================================================
+
+model Person {
+  id      String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId String @map("owner_id") @db.Uuid
+
+  name    String @db.Text
+  nameKey String @map("name_key") @db.Text
+
+  // Задел: когда-нибудь игрок заведёт аккаунт и увидит свою статистику.
+  userId String? @map("user_id") @db.Uuid
+
+  archivedAt DateTime? @map("archived_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  owner   User               @relation("PersonOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  account User?              @relation("PersonAccount", fields: [userId], references: [id], onDelete: SetNull)
+  entries TournamentPlayer[]
+
+  // Уникальность действует и на архив: повторный ввод имени должен
+  // разархивировать человека, а не создать двойника.
+  @@unique([ownerId, nameKey])
+  @@index([ownerId, name])
+  @@map("people")
+}
+
+// ============================================================================
+// Турниры
+// ============================================================================
+
+model Tournament {
+  id      String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId String @map("owner_id") @db.Uuid
+
+  name           String           @db.Text
+  format         TournamentFormat @default(americano)
+  courts         Int              @db.SmallInt
+  pointsPerMatch Int              @map("points_per_match") @db.SmallInt
+
+  // Статуса нет: он выводится из этих двух меток (вью tournament_overview).
+  // completedAt — внесён счёт последнего матча; closedAt — завершён досрочно.
+  // Обе идемпотентны и не сдвигаются при правке счёта.
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  closedAt    DateTime? @map("closed_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  owner   User               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  players TournamentPlayer[]
+  matches Match[]
+
+  @@index([ownerId, createdAt(sort: Desc)])
+  @@map("tournaments")
+}
+
+// Участник турнира. seat — порядок ввода, 0-based: индекс N в расписании от
+// генератора соответствует seat = N.
+model TournamentPlayer {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tournamentId String @map("tournament_id") @db.Uuid
+  personId     String @map("person_id") @db.Uuid
+  seat         Int    @db.SmallInt
+
+  tournament  Tournament         @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  person      Person             @relation(fields: [personId], references: [id], onDelete: Restrict)
+  appearances MatchParticipant[]
+
+  @@unique([tournamentId, seat])
+  // Один человек не может занять два места в одном турнире.
+  @@unique([tournamentId, personId])
+  // Мишень для составного внешнего ключа из MatchParticipant.
+  @@unique([id, tournamentId])
+  @@index([personId])
+  @@map("tournament_players")
+}
+
+model Match {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tournamentId String @map("tournament_id") @db.Uuid
+
+  roundNo Int @map("round_no") @db.SmallInt
+  courtNo Int @map("court_no") @db.SmallInt
+
+  // Копия tournaments.pointsPerMatch на момент создания. Делает инвариант
+  // суммы проверяемым в базе (иначе он межтабличный) и защищает уже сыгранные
+  // матчи, если норму турнира когда-нибудь разрешат менять.
+  pointsSum Int? @map("points_sum") @db.SmallInt
+
+  scoreA   Int?      @map("score_a") @db.SmallInt
+  scoreB   Int?      @map("score_b") @db.SmallInt
+  playedAt DateTime? @map("played_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tournament   Tournament         @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  participants MatchParticipant[]
+
+  @@unique([tournamentId, roundNo, courtNo])
+  // Мишень для составного внешнего ключа: тащит roundNo, чтобы база могла
+  // проверить «игрок не занят дважды в одном раунде».
+  @@unique([id, tournamentId, roundNo])
+  @@map("matches")
+}
+
+// Кто играл в матче.
+//
+// В паделе на корте всегда четверо: 2 на 2. Меняется способ разбивки на пары
+// (американо, мексикано, фиксированные пары), а не число мест — поэтому slot
+// ограничен двумя значениями, и этого хватает всем планируемым форматам.
+//
+// Что проверяет база:
+//   * игрок не встречается в матче дважды           — @@id
+//   * на стороне не больше двух                     — @@unique([matchId, side, slot]) + CHECK
+//   * участник из того же турнира, что и матч       — составной внешний ключ
+//   * игрок не занят на двух кортах в одном раунде  — @@unique([tournamentId, roundNo, ...])
+//   * ровно четверо, не трое                        — отложенный триггер в миграции
+model MatchParticipant {
+  matchId String @map("match_id") @db.Uuid
+  // Копия matches.roundNo: существует ради @@unique ниже, держится в согласии
+  // составным внешним ключом с onUpdate: Cascade.
+  roundNo Int    @map("round_no") @db.SmallInt
+
+  tournamentId       String    @map("tournament_id") @db.Uuid
+  tournamentPlayerId String    @map("tournament_player_id") @db.Uuid
+  side               MatchSide
+  slot               Int       @db.SmallInt
+
+  match  Match            @relation(fields: [matchId, tournamentId, roundNo], references: [id, tournamentId, roundNo], onDelete: Cascade, onUpdate: Cascade)
+  player TournamentPlayer @relation(fields: [tournamentPlayerId, tournamentId], references: [id, tournamentId], onDelete: Cascade)
+
+  @@id([matchId, tournamentPlayerId])
+  @@unique([matchId, side, slot])
+  @@unique([tournamentId, roundNo, tournamentPlayerId])
+  // Ключевой индекс: делает статистику по человеку обходом по индексу вместо
+  // полного скана matches, как было при раскладке по четырём колонкам.
+  @@index([tournamentPlayerId])
+  @@map("match_participants")
+}

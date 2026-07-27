@@ -1,10 +1,11 @@
 import { cookies } from 'next/headers';
-import { queryOne, query } from './db';
+import { prisma } from './prisma';
+import type { ChallengeKind } from '@/generated/prisma/enums';
 
 export const CHALLENGE_COOKIE = 'padel_webauthn';
 const CHALLENGE_TTL_MS = 5 * 60_000;
 
-export type ChallengeKind = 'registration' | 'authentication';
+export type { ChallengeKind };
 
 export interface RelyingParty {
   rpID: string;
@@ -35,22 +36,20 @@ export async function issueChallenge(
   challenge: string,
   meta: { userId?: string; username?: string; userHandle?: string } = {},
 ): Promise<void> {
-  const row = await queryOne<{ id: string }>(
-    `INSERT INTO webauthn_challenges (challenge, kind, user_id, username, user_handle, expires_at)
-     VALUES ($1, $2, $3, $4, $5, now() + ($6 || ' milliseconds')::interval)
-     RETURNING id`,
-    [
+  const row = await prisma.webauthnChallenge.create({
+    data: {
       challenge,
       kind,
-      meta.userId ?? null,
-      meta.username ?? null,
-      meta.userHandle ?? null,
-      String(CHALLENGE_TTL_MS),
-    ],
-  );
+      userId: meta.userId ?? null,
+      username: meta.username ?? null,
+      userHandle: meta.userHandle ?? null,
+      expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+    },
+    select: { id: true },
+  });
 
   const store = await cookies();
-  store.set(CHALLENGE_COOKIE, row!.id, {
+  store.set(CHALLENGE_COOKIE, row.id, {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
@@ -73,25 +72,15 @@ export async function consumeChallenge(kind: ChallengeKind): Promise<ConsumedCha
   store.delete(CHALLENGE_COOKIE);
   if (!id) return null;
 
-  const row = await queryOne<{
-    challenge: string;
-    user_id: string | null;
-    username: string | null;
-    user_handle: string | null;
-  }>(
-    `DELETE FROM webauthn_challenges
-      WHERE id = $1 AND kind = $2 AND expires_at > now()
-      RETURNING challenge, user_id, username, user_handle`,
-    [id, kind],
-  );
-
-  if (!row) return null;
-  return {
-    challenge: row.challenge,
-    userId: row.user_id,
-    username: row.username,
-    userHandle: row.user_handle,
-  };
+  // Одноразовость обеспечивается тем, что удаление и есть чтение: это один
+  // DELETE ... RETURNING, поэтому две параллельные попытки не могут обе
+  // увидеть строку. Отсутствие строки Prisma сообщает исключением P2025.
+  return prisma.webauthnChallenge
+    .delete({
+      where: { id, kind, expiresAt: { gt: new Date() } },
+      select: { challenge: true, userId: true, username: true, userHandle: true },
+    })
+    .catch(() => null);
 }
 
 export interface StoredCredential {
@@ -103,31 +92,26 @@ export interface StoredCredential {
 }
 
 export async function findCredential(credentialId: string): Promise<StoredCredential | null> {
-  const row = await queryOne<{
-    id: string;
-    user_id: string;
-    public_key: Buffer;
-    counter: string;
-    transports: string[];
-  }>('SELECT id, user_id, public_key, counter, transports FROM credentials WHERE id = $1', [
-    credentialId,
-  ]);
+  const row = await prisma.credential.findUnique({
+    where: { id: credentialId },
+    select: { id: true, userId: true, publicKey: true, counter: true, transports: true },
+  });
 
   if (!row) return null;
   return {
     id: row.id,
-    userId: row.user_id,
+    userId: row.userId,
     // `from` (not `new`) so the buffer type is a plain ArrayBuffer, which is
     // what @simplewebauthn/server's WebAuthnCredential expects.
-    publicKey: Uint8Array.from(row.public_key),
+    publicKey: Uint8Array.from(row.publicKey),
     counter: Number(row.counter),
     transports: row.transports,
   };
 }
 
 export async function updateCredentialCounter(id: string, counter: number): Promise<void> {
-  await query('UPDATE credentials SET counter = $2, last_used_at = now() WHERE id = $1', [
-    id,
-    counter,
-  ]);
+  await prisma.credential.update({
+    where: { id },
+    data: { counter: BigInt(counter), lastUsedAt: new Date() },
+  });
 }

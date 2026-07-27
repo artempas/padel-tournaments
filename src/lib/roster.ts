@@ -1,6 +1,7 @@
-import type { PoolClient } from 'pg';
-import { ApiError } from './api';
-import { query } from './db';
+import { ApiError, parseUuid } from './api';
+import { normalizeKey } from './normalize';
+import { prisma } from './prisma';
+import type { Prisma } from '@/generated/prisma/client';
 
 export interface RosterPlayer {
   id: string;
@@ -18,106 +19,100 @@ export interface RosterStat extends RosterPlayer {
   lastPlayedAt: string | null;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * Adds any unseen names to the organiser's roster and returns every id keyed
- * by lower-cased name. Existing entries keep their id but adopt the latest
+ * by normalised name. Existing entries keep their id but adopt the latest
  * spelling, so fixing a typo updates the person rather than duplicating them.
+ * A name that was archived comes back — «удалить» здесь значит «спрятать».
+ *
+ * Upsert на каждое имя вместо одного INSERT ... ON CONFLICT: игроков максимум
+ * 32, и это происходит однажды при создании турнира, так что типобезопасность
+ * стоит нескольких запросов внутри уже открытой транзакции.
  */
-export async function upsertRosterPlayers(
-  client: PoolClient,
+export async function upsertPeople(
+  tx: Prisma.TransactionClient,
   ownerId: string,
   names: string[],
 ): Promise<Map<string, string>> {
-  if (names.length === 0) return new Map();
+  const byKey = new Map<string, string>();
 
-  const values = names.map((_, i) => `($1, $${i + 2})`).join(', ');
-  const { rows } = await client.query<{ id: string; name: string }>(
-    `INSERT INTO roster_players (owner_id, name)
-     VALUES ${values}
-     ON CONFLICT (owner_id, lower(name)) DO UPDATE SET name = EXCLUDED.name
-     RETURNING id, name`,
-    [ownerId, ...names],
-  );
+  for (const name of names) {
+    const nameKey = normalizeKey(name);
+    const person = await tx.person.upsert({
+      where: { ownerId_nameKey: { ownerId, nameKey } },
+      create: { ownerId, name, nameKey },
+      update: { name, archivedAt: null },
+      select: { id: true },
+    });
+    byKey.set(nameKey, person.id);
+  }
 
-  // RETURNING order is not guaranteed, so map by name rather than by position.
-  return new Map(rows.map((r) => [r.name.toLocaleLowerCase('ru'), r.id]));
+  return byKey;
 }
 
 export async function listRoster(ownerId: string): Promise<RosterPlayer[]> {
-  return query<RosterPlayer>(
-    'SELECT id, name FROM roster_players WHERE owner_id = $1 ORDER BY lower(name)',
-    [ownerId],
-  );
-}
-
-/**
- * Career totals per person. Scores are attributed by checking which side of
- * the match the participant row sits on; unplayed matches are skipped.
- */
-export async function rosterStats(ownerId: string): Promise<RosterStat[]> {
-  const rows = await query<{
-    id: string;
-    name: string;
-    points_for: string;
-    points_against: string;
-    matches: string;
-    wins: string;
-    tournaments: string;
-    last_played_at: Date | null;
-  }>(
-    `WITH participation AS (
-       SELECT p.roster_player_id AS person_id,
-              m.tournament_id,
-              m.played_at,
-              CASE WHEN p.id IN (m.team1_p1, m.team1_p2) THEN m.score1 ELSE m.score2 END AS scored,
-              CASE WHEN p.id IN (m.team1_p1, m.team1_p2) THEN m.score2 ELSE m.score1 END AS conceded
-         FROM players p
-         JOIN matches m
-           ON m.tournament_id = p.tournament_id
-          AND p.id IN (m.team1_p1, m.team1_p2, m.team2_p1, m.team2_p2)
-        WHERE p.roster_player_id IS NOT NULL
-          AND m.score1 IS NOT NULL
-     )
-     SELECT rp.id,
-            rp.name,
-            coalesce(sum(pa.scored), 0)                                  AS points_for,
-            coalesce(sum(pa.conceded), 0)                                AS points_against,
-            count(pa.person_id)                                          AS matches,
-            count(pa.person_id) FILTER (WHERE pa.scored > pa.conceded)   AS wins,
-            count(DISTINCT pa.tournament_id)                             AS tournaments,
-            max(pa.played_at)                                            AS last_played_at
-       FROM roster_players rp
-       LEFT JOIN participation pa ON pa.person_id = rp.id
-      WHERE rp.owner_id = $1
-      GROUP BY rp.id, rp.name
-      ORDER BY points_for DESC, lower(rp.name)`,
-    [ownerId],
-  );
-
-  return rows.map((r) => {
-    const pointsFor = Number(r.points_for);
-    const pointsAgainst = Number(r.points_against);
-    return {
-      id: r.id,
-      name: r.name,
-      pointsFor,
-      pointsAgainst,
-      diff: pointsFor - pointsAgainst,
-      matches: Number(r.matches),
-      wins: Number(r.wins),
-      tournaments: Number(r.tournaments),
-      lastPlayedAt: r.last_played_at?.toISOString() ?? null,
-    };
+  return prisma.person.findMany({
+    where: { ownerId, archivedAt: null },
+    select: { id: true, name: true },
+    orderBy: { nameKey: 'asc' },
   });
 }
 
-export async function deleteRosterPlayer(ownerId: string, id: string): Promise<void> {
-  if (!UUID_RE.test(id)) throw new ApiError('Игрок не найден', 404);
-  const rows = await query<{ id: string }>(
-    'DELETE FROM roster_players WHERE id = $1 AND owner_id = $2 RETURNING id',
-    [id, ownerId],
-  );
-  if (rows.length === 0) throw new ApiError('Игрок не найден', 404);
+interface CareerRow {
+  id: string;
+  name: string;
+  points_for: bigint;
+  points_against: bigint;
+  diff: bigint;
+  matches: bigint;
+  wins: bigint;
+  tournaments: bigint;
+  last_played_at: Date | null;
+}
+
+/**
+ * Career totals per person, из вью person_career.
+ *
+ * Это единственное место, где нужен сырой SQL: очки участника зависят от того,
+ * на какой стороне матча он стоял, а такой CASE в языке запросов Prisma не
+ * выражается. Зато обход идёт по индексам — в v1 здесь был полный скан matches.
+ */
+export async function rosterStats(ownerId: string): Promise<RosterStat[]> {
+  const rows = await prisma.$queryRaw<CareerRow[]>`
+    SELECT person_id AS id, name, points_for, points_against, diff,
+           matches, wins, tournaments, last_played_at
+      FROM person_career
+     WHERE owner_id = ${ownerId}::uuid
+       AND archived_at IS NULL
+     ORDER BY points_for DESC, lower(name)
+  `;
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    pointsFor: Number(r.points_for),
+    pointsAgainst: Number(r.points_against),
+    diff: Number(r.diff),
+    matches: Number(r.matches),
+    wins: Number(r.wins),
+    tournaments: Number(r.tournaments),
+    lastPlayedAt: r.last_played_at?.toISOString() ?? null,
+  }));
+}
+
+/**
+ * Убирает человека из ростера. Строка остаётся: на неё ссылаются участники
+ * сыгранных турниров, и связь помечена ON DELETE RESTRICT именно затем, чтобы
+ * историю нельзя было стереть случайно. Пропадает только подсказка при
+ * создании нового турнира.
+ */
+export async function archivePerson(ownerId: string, id: string): Promise<void> {
+  const personId = parseUuid(id, 'Игрок не найден');
+
+  const { count } = await prisma.person.updateMany({
+    where: { id: personId, ownerId, archivedAt: null },
+    data: { archivedAt: new Date() },
+  });
+
+  if (count === 0) throw new ApiError('Игрок не найден', 404);
 }

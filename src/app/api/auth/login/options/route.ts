@@ -1,7 +1,8 @@
 import { generateAuthenticationOptions } from '@simplewebauthn/server';
 import type { AuthenticatorTransportFuture } from '@simplewebauthn/server';
 import { ApiError, json, readJson, route } from '@/lib/api';
-import { query, queryOne } from '@/lib/db';
+import { normalizeKey } from '@/lib/normalize';
+import { prisma } from '@/lib/prisma';
 import { issueChallenge, relyingParty } from '@/lib/webauthn';
 import { pruneExpired } from '@/lib/auth';
 
@@ -21,20 +22,15 @@ export const POST = route(async (request: Request) => {
 
   // With no username the browser offers any discoverable passkey for this site.
   if (username) {
-    const user = await queryOne<{ id: string }>(
-      'SELECT id FROM users WHERE lower(username) = lower($1)',
-      [username],
-    );
+    const user = await prisma.user.findUnique({
+      where: { usernameKey: normalizeKey(username) },
+      select: { id: true, credentials: { select: { id: true, transports: true } } },
+    });
     if (!user) throw new ApiError('Пользователь не найден', 404);
-
-    const credentials = await query<{ id: string; transports: string[] }>(
-      'SELECT id, transports FROM credentials WHERE user_id = $1',
-      [user.id],
-    );
-    if (credentials.length === 0) throw new ApiError('У пользователя нет passkey', 404);
+    if (user.credentials.length === 0) throw new ApiError('У пользователя нет passkey', 404);
 
     userId = user.id;
-    allowCredentials = credentials.map((c) => ({
+    allowCredentials = user.credentials.map((c) => ({
       id: c.id,
       transports: c.transports as AuthenticatorTransportFuture[],
     }));

@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { cookies } from 'next/headers';
-import { query, queryOne } from './db';
+import { prisma } from './prisma';
 
 export const SESSION_COOKIE = 'padel_session';
 const SESSION_TTL_DAYS = 30;
@@ -11,8 +11,10 @@ export interface SessionUser {
   displayName: string;
 }
 
-function hashToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
+/** Хранится и сравнивается как bytea — 32 байта вместо 64 символов hex. */
+function hashToken(token: string): Uint8Array<ArrayBuffer> {
+  // `from`, а не сам Buffer: Prisma ждёт Uint8Array с обычным ArrayBuffer.
+  return Uint8Array.from(createHash('sha256').update(token).digest());
 }
 
 /**
@@ -23,11 +25,9 @@ export async function createSession(userId: string): Promise<void> {
   const token = randomBytes(32).toString('base64url');
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 86_400_000);
 
-  await query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [
-    hashToken(token),
-    userId,
-    expiresAt,
-  ]);
+  await prisma.session.create({
+    data: { tokenHash: hashToken(token), userId, expiresAt },
+  });
 
   const store = await cookies();
   store.set(SESSION_COOKIE, token, {
@@ -44,29 +44,29 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   const token = store.get(SESSION_COOKIE)?.value;
   if (!token) return null;
 
-  const row = await queryOne<{ id: string; username: string; display_name: string }>(
-    `SELECT u.id, u.username, u.display_name
-       FROM sessions s
-       JOIN users u ON u.id = s.user_id
-      WHERE s.token_hash = $1 AND s.expires_at > now()`,
-    [hashToken(token)],
-  );
+  const session = await prisma.session.findFirst({
+    where: { tokenHash: hashToken(token), expiresAt: { gt: new Date() } },
+    select: { user: { select: { id: true, username: true, displayName: true } } },
+  });
 
-  if (!row) return null;
-  return { id: row.id, username: row.username, displayName: row.display_name };
+  return session?.user ?? null;
 }
 
 export async function destroySession(): Promise<void> {
   const store = await cookies();
   const token = store.get(SESSION_COOKIE)?.value;
   if (token) {
-    await query('DELETE FROM sessions WHERE token_hash = $1', [hashToken(token)]);
+    // deleteMany, а не delete: удаление отсутствующей строки не должно падать.
+    await prisma.session.deleteMany({ where: { tokenHash: hashToken(token) } });
   }
   store.delete(SESSION_COOKIE);
 }
 
 /** Housekeeping for expired sessions and challenges; cheap enough to run on login. */
 export async function pruneExpired(): Promise<void> {
-  await query('DELETE FROM sessions WHERE expires_at < now()');
-  await query('DELETE FROM webauthn_challenges WHERE expires_at < now()');
+  const now = new Date();
+  await Promise.all([
+    prisma.session.deleteMany({ where: { expiresAt: { lt: now } } }),
+    prisma.webauthnChallenge.deleteMany({ where: { expiresAt: { lt: now } } }),
+  ]);
 }

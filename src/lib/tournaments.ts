@@ -1,47 +1,17 @@
-import type { PoolClient } from 'pg';
-import { ApiError } from './api';
-import { query, queryOne, transaction } from './db';
+import { randomUUID } from 'node:crypto';
+import { ApiError, parseUuid } from './api';
 import { generateAmericano, MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS } from './americano';
-import { upsertRosterPlayers } from './roster';
-import type { Match, Player, TournamentDetail, TournamentSummary } from './types';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-interface TournamentRow {
-  id: string;
-  name: string;
-  courts: number;
-  format: 'americano';
-  points_per_match: number;
-  status: 'running' | 'finished';
-  closed_manually: boolean;
-  created_at: Date;
-  finished_at: Date | null;
-}
-
-interface MatchRow {
-  id: string;
-  round_no: number;
-  court_no: number;
-  team1_p1: string;
-  team1_p2: string;
-  team2_p1: string;
-  team2_p2: string;
-  score1: number | null;
-  score2: number | null;
-}
-
-function toMatch(row: MatchRow): Match {
-  return {
-    id: row.id,
-    round: row.round_no,
-    court: row.court_no,
-    team1: [row.team1_p1, row.team1_p2],
-    team2: [row.team2_p1, row.team2_p2],
-    score1: row.score1,
-    score2: row.score2,
-  };
-}
+import { normalizeKey } from './normalize';
+import { prisma } from './prisma';
+import { upsertPeople } from './roster';
+import type {
+  Match,
+  Player,
+  TournamentDetail,
+  TournamentFormat,
+  TournamentSummary,
+} from './types';
+import type { Prisma } from '@/generated/prisma/client';
 
 export interface CreateTournamentInput {
   name?: string;
@@ -73,7 +43,9 @@ export function validateCreateInput(input: CreateTournamentInput): ValidatedInpu
     throw new ApiError('Имя игрока не длиннее 40 символов');
   }
 
-  const seen = new Set(players.map((p) => p.toLocaleLowerCase('ru')));
+  // Та же нормализация, что уходит в people.name_key, — иначе два имени,
+  // которые база считает одним человеком, попали бы на два места в турнире.
+  const seen = new Set(players.map(normalizeKey));
   if (seen.size !== players.length) throw new ApiError('Имена игроков должны быть уникальными');
 
   const courts = Number(input.courts);
@@ -89,6 +61,23 @@ export function validateCreateInput(input: CreateTournamentInput): ValidatedInpu
   return { name, players, courts, pointsPerMatch };
 }
 
+/**
+ * Статус турнира в базе не хранится — он выводится из двух меток времени.
+ * Здесь то же правило, что во вью tournament_overview: метка «досрочно» видна,
+ * только пока действительно осталось недоигранное.
+ */
+function lifecycle(completedAt: Date | null, closedAt: Date | null) {
+  const finished = completedAt !== null || closedAt !== null;
+  const stamps = [completedAt, closedAt].filter((d): d is Date => d !== null);
+  return {
+    status: (finished ? 'finished' : 'running') as 'running' | 'finished',
+    closedEarly: closedAt !== null && completedAt === null,
+    finishedAt: stamps.length
+      ? new Date(Math.min(...stamps.map((d) => d.getTime()))).toISOString()
+      : null,
+  };
+}
+
 export async function createTournament(
   ownerId: string,
   input: CreateTournamentInput,
@@ -96,73 +85,93 @@ export async function createTournament(
   const { name, players, courts, pointsPerMatch } = validateCreateInput(input);
   const schedule = generateAmericano(players.length, courts);
 
-  return transaction(async (client) => {
-    const tournament = await client.query<{ id: string }>(
-      `INSERT INTO tournaments (owner_id, name, courts, format, points_per_match)
-       VALUES ($1, $2, $3, 'americano', $4)
-       RETURNING id`,
-      [ownerId, name, courts, pointsPerMatch],
-    );
-    const tournamentId = tournament.rows[0].id;
-
+  return prisma.$transaction(async (tx) => {
     // Everyone entered here joins the organiser's permanent roster, which is
     // what makes cross-tournament totals possible.
-    const roster = await upsertRosterPlayers(client, ownerId, players);
+    const people = await upsertPeople(tx, ownerId, players);
 
-    // Players are inserted in entry order, so seat N lines up with schedule index N.
-    const playerParams: unknown[] = [tournamentId];
-    const playerValues = players.map((name, i) => {
-      const base = playerParams.length;
-      playerParams.push(name, roster.get(name.toLocaleLowerCase('ru')) ?? null);
-      return `($1, $${base + 1}, ${i}, $${base + 2})`;
-    });
-    const inserted = await client.query<{ id: string; seat: number }>(
-      `INSERT INTO players (tournament_id, name, seat, roster_player_id)
-       VALUES ${playerValues.join(', ')}
-       RETURNING id, seat`,
-      playerParams,
-    );
-    // Sort by seat rather than trusting RETURNING to preserve VALUES order.
-    const ids = inserted.rows.sort((a, b) => a.seat - b.seat).map((r) => r.id);
-
-    const params: unknown[] = [tournamentId];
-    const rows = schedule.matches.map((m) => {
-      const base = params.length;
-      params.push(
-        m.round,
-        m.court,
-        ids[m.team1[0]],
-        ids[m.team1[1]],
-        ids[m.team2[0]],
-        ids[m.team2[1]],
-      );
-      return `($1, $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+    // Участники заводятся вместе с турниром: seat N совпадает с индексом N,
+    // по которому генератор расставил игроков в расписании.
+    const tournament = await tx.tournament.create({
+      data: {
+        ownerId,
+        name,
+        courts,
+        pointsPerMatch,
+        format: 'americano',
+        players: {
+          create: players.map((playerName, seat) => ({
+            seat,
+            personId: people.get(normalizeKey(playerName))!,
+          })),
+        },
+      },
+      select: { id: true, players: { select: { id: true, seat: true } } },
     });
 
-    await client.query(
-      `INSERT INTO matches (tournament_id, round_no, court_no, team1_p1, team1_p2, team2_p1, team2_p2)
-       VALUES ${rows.join(', ')}`,
-      params,
-    );
+    const bySeat = new Map(tournament.players.map((p) => [p.seat, p.id]));
+    const seatId = (index: number): string => bySeat.get(index)!;
 
-    return tournamentId;
+    // id матчей генерируются здесь, чтобы участников можно было вставить одним
+    // createMany, не дожидаясь RETURNING. Триггер «ровно четверо» отложен до
+    // COMMIT, поэтому промежуточное состояние его не смущает.
+    const matches = schedule.matches.map((m) => ({
+      id: randomUUID(),
+      tournamentId: tournament.id,
+      roundNo: m.round,
+      courtNo: m.court,
+      pointsSum: pointsPerMatch,
+    }));
+
+    await tx.match.createMany({ data: matches });
+
+    await tx.matchParticipant.createMany({
+      data: schedule.matches.flatMap((m, i) => {
+        const shared = {
+          matchId: matches[i].id,
+          tournamentId: tournament.id,
+          roundNo: m.round,
+        };
+        return [
+          { ...shared, tournamentPlayerId: seatId(m.team1[0]), side: 'a' as const, slot: 1 },
+          { ...shared, tournamentPlayerId: seatId(m.team1[1]), side: 'a' as const, slot: 2 },
+          { ...shared, tournamentPlayerId: seatId(m.team2[0]), side: 'b' as const, slot: 1 },
+          { ...shared, tournamentPlayerId: seatId(m.team2[1]), side: 'b' as const, slot: 2 },
+        ];
+      }),
+    });
+
+    return tournament.id;
   });
 }
 
+interface OverviewRow {
+  id: string;
+  name: string;
+  courts: number;
+  format: TournamentFormat;
+  points_per_match: number;
+  completed_at: Date | null;
+  closed_at: Date | null;
+  created_at: Date;
+  player_count: bigint;
+  match_count: bigint;
+  played_count: bigint;
+}
+
+/**
+ * Список турниров берётся из вью: счётчик сыгранных матчей — это count с
+ * условием, а такой агрегат по связи Prisma выразить не умеет.
+ */
 export async function listTournaments(ownerId: string): Promise<TournamentSummary[]> {
-  const rows = await query<
-    TournamentRow & { player_count: string; match_count: string; played_count: string }
-  >(
-    `SELECT t.*,
-            (SELECT count(*) FROM players p WHERE p.tournament_id = t.id) AS player_count,
-            (SELECT count(*) FROM matches m WHERE m.tournament_id = t.id) AS match_count,
-            (SELECT count(*) FROM matches m WHERE m.tournament_id = t.id AND m.score1 IS NOT NULL)
-              AS played_count
-       FROM tournaments t
-      WHERE t.owner_id = $1
-      ORDER BY t.created_at DESC`,
-    [ownerId],
-  );
+  const rows = await prisma.$queryRaw<OverviewRow[]>`
+    SELECT id, name, courts, format, points_per_match,
+           completed_at, closed_at, created_at,
+           player_count, match_count, played_count
+      FROM tournament_overview
+     WHERE owner_id = ${ownerId}::uuid
+     ORDER BY created_at DESC
+  `;
 
   return rows.map((r) => ({
     id: r.id,
@@ -170,67 +179,95 @@ export async function listTournaments(ownerId: string): Promise<TournamentSummar
     courts: r.courts,
     format: r.format,
     pointsPerMatch: r.points_per_match,
-    status: r.status,
-    closedEarly: r.closed_manually,
     createdAt: r.created_at.toISOString(),
-    finishedAt: r.finished_at?.toISOString() ?? null,
+    ...lifecycle(r.completed_at, r.closed_at),
     playerCount: Number(r.player_count),
     matchCount: Number(r.match_count),
     playedCount: Number(r.played_count),
   }));
 }
 
-export async function loadTournament(
-  id: string,
-  ownerId: string,
-): Promise<TournamentDetail> {
-  if (!UUID_RE.test(id)) throw new ApiError('Турнир не найден', 404);
+export async function loadTournament(id: string, ownerId: string): Promise<TournamentDetail> {
+  const tournamentId = parseUuid(id, 'Турнир не найден');
 
-  const t = await queryOne<TournamentRow>(
-    'SELECT * FROM tournaments WHERE id = $1 AND owner_id = $2',
-    [id, ownerId],
-  );
+  const t = await prisma.tournament.findFirst({
+    where: { id: tournamentId, ownerId },
+    select: {
+      id: true,
+      name: true,
+      courts: true,
+      format: true,
+      pointsPerMatch: true,
+      completedAt: true,
+      closedAt: true,
+      createdAt: true,
+      players: {
+        select: { id: true, seat: true, person: { select: { name: true } } },
+        orderBy: { seat: 'asc' },
+      },
+      matches: {
+        select: {
+          id: true,
+          roundNo: true,
+          courtNo: true,
+          scoreA: true,
+          scoreB: true,
+          participants: { select: { tournamentPlayerId: true, side: true, slot: true } },
+        },
+        orderBy: [{ roundNo: 'asc' }, { courtNo: 'asc' }],
+      },
+    },
+  });
+
   if (!t) throw new ApiError('Турнир не найден', 404);
 
-  const players = await query<{ id: string; name: string; seat: number }>(
-    'SELECT id, name, seat FROM players WHERE tournament_id = $1 ORDER BY seat',
-    [id],
-  );
+  const players: Player[] = t.players.map((p) => ({
+    id: p.id,
+    name: p.person.name,
+    seat: p.seat,
+  }));
 
-  const matches = await query<MatchRow>(
-    `SELECT id, round_no, court_no, team1_p1, team1_p2, team2_p1, team2_p2, score1, score2
-       FROM matches WHERE tournament_id = $1 ORDER BY round_no, court_no`,
-    [id],
-  );
+  const matches: Match[] = t.matches.map((m) => {
+    // Участники приходят четырьмя строками; наружу отдаём прежнюю форму, чтобы
+    // клиенту не пришлось знать про раскладку по side/slot.
+    const seat = (side: 'a' | 'b', slot: number): string =>
+      m.participants.find((p) => p.side === side && p.slot === slot)!.tournamentPlayerId;
+
+    return {
+      id: m.id,
+      round: m.roundNo,
+      court: m.courtNo,
+      team1: [seat('a', 1), seat('a', 2)],
+      team2: [seat('b', 1), seat('b', 2)],
+      score1: m.scoreA,
+      score2: m.scoreB,
+    };
+  });
 
   return {
     id: t.id,
     name: t.name,
     courts: t.courts,
     format: t.format,
-    pointsPerMatch: t.points_per_match,
-    status: t.status,
-    closedEarly: t.closed_manually,
-    createdAt: t.created_at.toISOString(),
-    finishedAt: t.finished_at?.toISOString() ?? null,
-    players: players as Player[],
-    matches: matches.map(toMatch),
+    pointsPerMatch: t.pointsPerMatch,
+    createdAt: t.createdAt.toISOString(),
+    ...lifecycle(t.completedAt, t.closedAt),
+    players,
+    matches,
   };
 }
 
 export async function deleteTournament(id: string, ownerId: string): Promise<void> {
-  if (!UUID_RE.test(id)) throw new ApiError('Турнир не найден', 404);
-  const rows = await query<{ id: string }>(
-    'DELETE FROM tournaments WHERE id = $1 AND owner_id = $2 RETURNING id',
-    [id, ownerId],
-  );
-  if (rows.length === 0) throw new ApiError('Турнир не найден', 404);
+  const tournamentId = parseUuid(id, 'Турнир не найден');
+  const { count } = await prisma.tournament.deleteMany({ where: { id: tournamentId, ownerId } });
+  if (count === 0) throw new ApiError('Турнир не найден', 404);
 }
 
 /**
  * Record (or clear) a match result. Scores must add up to the tournament's
  * points-per-match, which is what makes "16 очков на матч" a hard rule rather
- * than a convention.
+ * than a convention. База проверяет это же ограничением matches_score_sum —
+ * здесь проверка нужна лишь затем, чтобы вернуть внятный текст вместо 500.
  */
 export async function setMatchScore(
   tournamentId: string,
@@ -239,65 +276,57 @@ export async function setMatchScore(
   score1: number | null,
   score2: number | null,
 ): Promise<TournamentDetail> {
-  if (!UUID_RE.test(tournamentId) || !UUID_RE.test(matchId)) {
-    throw new ApiError('Матч не найден', 404);
-  }
+  const tid = parseUuid(tournamentId, 'Матч не найден');
+  const mid = parseUuid(matchId, 'Матч не найден');
 
-  const t = await queryOne<{ points_per_match: number }>(
-    'SELECT points_per_match FROM tournaments WHERE id = $1 AND owner_id = $2',
-    [tournamentId, ownerId],
-  );
+  const t = await prisma.tournament.findFirst({
+    where: { id: tid, ownerId },
+    select: { pointsPerMatch: true },
+  });
   if (!t) throw new ApiError('Турнир не найден', 404);
 
   const clearing = score1 === null && score2 === null;
   if (!clearing) {
-    if (
-      !Number.isInteger(score1) ||
-      !Number.isInteger(score2) ||
-      score1! < 0 ||
-      score2! < 0
-    ) {
+    if (!Number.isInteger(score1) || !Number.isInteger(score2) || score1! < 0 || score2! < 0) {
       throw new ApiError('Счёт должен быть неотрицательным целым числом');
     }
-    if (score1! + score2! !== t.points_per_match) {
-      throw new ApiError(`Сумма очков в матче должна быть равна ${t.points_per_match}`);
+    if (score1! + score2! !== t.pointsPerMatch) {
+      throw new ApiError(`Сумма очков в матче должна быть равна ${t.pointsPerMatch}`);
     }
   }
 
-  await transaction(async (client) => {
-    const updated = await client.query(
-      `UPDATE matches
-          SET score1 = $3, score2 = $4, played_at = CASE WHEN $3::int IS NULL THEN NULL ELSE now() END
-        WHERE id = $1 AND tournament_id = $2`,
-      [matchId, tournamentId, score1, score2],
-    );
-    if (updated.rowCount === 0) throw new ApiError('Матч не найден', 404);
+  await prisma.$transaction(async (tx) => {
+    const updated = await tx.match.updateMany({
+      where: { id: mid, tournamentId: tid },
+      data: { scoreA: score1, scoreB: score2, playedAt: clearing ? null : new Date() },
+    });
+    if (updated.count === 0) throw new ApiError('Матч не найден', 404);
 
-    await refreshStatus(client, tournamentId);
+    await refreshCompletion(tx, tid);
   });
 
-  return loadTournament(tournamentId, ownerId);
+  return loadTournament(tid, ownerId);
 }
 
 /**
- * A tournament is finished when every match has a score, or when the organiser
- * closed it by hand. `finished_at` is kept from the first time it finished, so
- * correcting a score afterwards does not move the timestamp.
+ * A tournament is complete when every match has a score. `completed_at` keeps
+ * the moment it first became so: the `completedAt: null` guard means correcting
+ * a score afterwards does not move the timestamp.
  */
-async function refreshStatus(client: PoolClient, tournamentId: string): Promise<void> {
-  await client.query(
-    `UPDATE tournaments t
-        SET status = CASE WHEN done THEN 'finished' ELSE 'running' END,
-            finished_at = CASE WHEN done THEN coalesce(t.finished_at, now()) ELSE NULL END
-       FROM (
-         SELECT (t2.closed_manually
-                 OR NOT EXISTS (SELECT 1 FROM matches m
-                                 WHERE m.tournament_id = t2.id AND m.score1 IS NULL)) AS done
-           FROM tournaments t2 WHERE t2.id = $1
-       ) AS state
-      WHERE t.id = $1`,
-    [tournamentId],
-  );
+async function refreshCompletion(tx: Prisma.TransactionClient, tournamentId: string): Promise<void> {
+  const unplayed = await tx.match.count({ where: { tournamentId, scoreA: null } });
+
+  if (unplayed === 0) {
+    await tx.tournament.updateMany({
+      where: { id: tournamentId, completedAt: null },
+      data: { completedAt: new Date() },
+    });
+  } else {
+    await tx.tournament.updateMany({
+      where: { id: tournamentId, completedAt: { not: null } },
+      data: { completedAt: null },
+    });
+  }
 }
 
 /**
@@ -309,16 +338,21 @@ export async function setTournamentClosed(
   ownerId: string,
   closed: boolean,
 ): Promise<TournamentDetail> {
-  if (!UUID_RE.test(tournamentId)) throw new ApiError('Турнир не найден', 404);
+  const tid = parseUuid(tournamentId, 'Турнир не найден');
 
-  await transaction(async (client) => {
-    const updated = await client.query(
-      'UPDATE tournaments SET closed_manually = $3 WHERE id = $1 AND owner_id = $2',
-      [tournamentId, ownerId, closed],
-    );
-    if (updated.rowCount === 0) throw new ApiError('Турнир не найден', 404);
-    await refreshStatus(client, tournamentId);
+  const owned = await prisma.tournament.findFirst({
+    where: { id: tid, ownerId },
+    select: { closedAt: true },
   });
+  if (!owned) throw new ApiError('Турнир не найден', 404);
 
-  return loadTournament(tournamentId, ownerId);
+  // Повторное закрытие не сдвигает метку — по той же причине, что и completed_at.
+  if (closed !== (owned.closedAt !== null)) {
+    await prisma.tournament.updateMany({
+      where: { id: tid, ownerId },
+      data: { closedAt: closed ? new Date() : null },
+    });
+  }
+
+  return loadTournament(tid, ownerId);
 }

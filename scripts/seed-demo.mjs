@@ -12,17 +12,29 @@ const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
 await client.connect();
 
 const username = 'demo';
-await client.query('DELETE FROM users WHERE username = $1', [username]);
+// Порядок важен. tournament_players ссылается на people через ON DELETE
+// RESTRICT — это защищает историю от случайного удаления человека. Но при
+// удалении самого пользователя Postgres не гарантирует, в каком порядке
+// отработают каскады, и проверка RESTRICT может сработать раньше, чем уедут
+// участники. Поэтому сносим турниры явно, а уже потом аккаунт: к этому
+// моменту на people никто не ссылается, и каскад проходит.
+await client.query(
+  'DELETE FROM tournaments WHERE owner_id IN (SELECT id FROM users WHERE username_key = $1)',
+  [username],
+);
+await client.query('DELETE FROM users WHERE username_key = $1', [username]);
+
 const { rows } = await client.query(
-  'INSERT INTO users (username, display_name) VALUES ($1, $1) RETURNING id',
+  'INSERT INTO users (username, username_key, display_name) VALUES ($1, $1, $1) RETURNING id',
   [username],
 );
 const userId = rows[0].id;
 
 const token = randomBytes(32).toString('base64url');
+// token_hash теперь bytea, а не hex-строка.
 await client.query(
   "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '30 days')",
-  [createHash('sha256').update(token).digest('hex'), userId],
+  [createHash('sha256').update(token).digest(), userId],
 );
 const cookie = `padel_session=${token}`;
 

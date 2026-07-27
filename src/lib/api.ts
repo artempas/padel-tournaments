@@ -37,6 +37,17 @@ export async function requireUser(): Promise<SessionUser> {
   return user;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Отсекает нечисловые id до похода в базу: Postgres на кривой uuid отвечает
+ * ошибкой типа, а пользователю нужен честный 404.
+ */
+export function parseUuid(value: string, message: string): string {
+  if (!UUID_RE.test(value)) throw new ApiError(message, 404);
+  return value;
+}
+
 export async function readJson<T>(request: Request): Promise<T> {
   try {
     return (await request.json()) as T;

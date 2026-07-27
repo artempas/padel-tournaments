@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { generateRegistrationOptions } from '@simplewebauthn/server';
 import { ApiError, json, readJson, route } from '@/lib/api';
-import { queryOne } from '@/lib/db';
+import { normalizeKey } from '@/lib/normalize';
+import { prisma } from '@/lib/prisma';
 import { issueChallenge, relyingParty } from '@/lib/webauthn';
 import { pruneExpired } from '@/lib/auth';
 
@@ -17,10 +18,10 @@ export const POST = route(async (request: Request) => {
 
   await pruneExpired();
 
-  const existing = await queryOne<{ id: string }>(
-    'SELECT id FROM users WHERE lower(username) = lower($1)',
-    [username],
-  );
+  const existing = await prisma.user.findUnique({
+    where: { usernameKey: normalizeKey(username) },
+    select: { id: true },
+  });
   if (existing) throw new ApiError('Такое имя уже занято', 409);
 
   // Reserve the id now so the authenticator's user handle equals users.id.
