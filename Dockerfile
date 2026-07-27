@@ -30,6 +30,10 @@ RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# The standalone bundle does not carry public/ — and without it there is no
+# service worker and no manifest icons.
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+
 # Migrations run from the same image, so the schema ships with it.
 COPY --from=builder --chown=nextjs:nodejs /app/scripts/migrate.mjs ./scripts/migrate.mjs
 COPY --from=builder --chown=nextjs:nodejs /app/db/schema.sql ./db/schema.sql

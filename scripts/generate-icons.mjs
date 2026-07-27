@@ -1,15 +1,18 @@
 /**
- * Rasterises src/app/icon.svg into the bitmap icons browsers still need.
+ * Rasterises src/app/icon.svg into the bitmap icons browsers still need —
+ * favicon, the iOS home-screen icon and the ones the web app manifest points at.
  *
- *   node scripts/generate-icons.mjs
+ *   npm run icons
  *
- * `icon.svg` is the source of truth — edit it, then re-run this.
+ * `icon.svg` is the source of truth — edit it, then re-run this. sharp is not a
+ * declared dependency: it arrives with Next. Install it if that ever changes.
  */
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 
 const appDir = new URL('../src/app/', import.meta.url);
+const publicDir = new URL('../public/', import.meta.url);
 const svg = await readFile(fileURLToPath(new URL('icon.svg', appDir)));
 
 async function png(size) {
@@ -43,4 +46,32 @@ await writeFile(
   Buffer.concat([header, icoPng]),
 );
 
-console.log('Wrote apple-icon.png (180px) and favicon.ico (32px)');
+/**
+ * Icons for the web app manifest. They live in `public/` because the manifest
+ * points at them by URL — the `src/app` icon conventions only cover the tags
+ * Next injects itself.
+ */
+await mkdir(fileURLToPath(publicDir), { recursive: true });
+await writeFile(fileURLToPath(new URL('icon-192.png', publicDir)), await png(192));
+await writeFile(fileURLToPath(new URL('icon-512.png', publicDir)), await png(512));
+
+/**
+ * A maskable icon is cropped to whatever shape the launcher likes — a circle on
+ * most Androids — so everything important must sit inside the middle 80%.
+ * Scaling the artwork to 80% and padding with the background colour does that.
+ */
+const MASKABLE = 512;
+const inner = Math.round(MASKABLE * 0.8);
+const pad = (MASKABLE - inner) / 2;
+await writeFile(
+  fileURLToPath(new URL('icon-maskable-512.png', publicDir)),
+  await sharp(await png(inner))
+    .extend({ top: pad, bottom: pad, left: pad, right: pad, background: '#070c16' })
+    .png({ compressionLevel: 9 })
+    .toBuffer(),
+);
+
+console.log(
+  'Wrote apple-icon.png (180px), favicon.ico (32px) and manifest icons ' +
+    '(192px, 512px, 512px maskable)',
+);

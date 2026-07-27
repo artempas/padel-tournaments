@@ -1,10 +1,12 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
 import ThemeToggle from './ThemeToggle';
+import { flushQueue, queueScore, readQueue } from '@/lib/offline';
+import { applyPendingScores, type PendingScore } from '@/lib/pending-scores';
 import { plural } from '@/lib/plural';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
@@ -17,13 +19,62 @@ function teamName(ids: [string, string], playersById: Map<string, Player>): stri
 
 export default function TournamentView({ initial }: { initial: TournamentDetail }) {
   const router = useRouter();
-  const [tournament, setTournament] = useState(initial);
+  // `server` is the last state the server confirmed; `tournament` is that with
+  // the offline queue laid on top — which is what the organiser actually sees.
+  const [server, setServer] = useState(initial);
+  const [pending, setPending] = useState<PendingScore[]>([]);
+  const [online, setOnline] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [tab, setTab] = useState<Tab>(initial.status === 'finished' ? 'table' : 'matches');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFinish, setConfirmFinish] = useState(false);
+
+  const tournament = useMemo(() => applyPendingScores(server, pending), [server, pending]);
+  const pendingIds = useMemo(() => new Set(pending.map((p) => p.matchId)), [pending]);
+
+  const sync = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const result = await flushQueue(initial.id);
+      setPending(result.pending);
+      if (result.tournament) {
+        setServer(result.tournament);
+        router.refresh();
+      }
+      if (result.offline) setOnline(false);
+      if (result.errors.length > 0) setError(result.errors[0]);
+    } finally {
+      setSyncing(false);
+    }
+  }, [initial.id, router]);
+
+  // Scores left over from a previous visit — the tab may have been closed with
+  // no connection — are shown at once and sent as soon as there is one.
+  useEffect(() => {
+    readQueue(initial.id)
+      .then(setPending)
+      .catch(() => {});
+    setOnline(navigator.onLine);
+    if (navigator.onLine) void sync();
+  }, [initial.id, sync]);
+
+  useEffect(() => {
+    const goOnline = () => {
+      setOnline(true);
+      void sync();
+    };
+    const goOffline = () => setOnline(false);
+
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, [sync]);
 
   const playersById = useMemo(
     () => new Map(tournament.players.map((p) => [p.id, p])),
@@ -56,29 +107,29 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
 
   const editing = editingId ? (tournament.matches.find((m) => m.id === editingId) ?? null) : null;
 
+  /**
+   * The score is written to the local queue first and sent second, so the sheet
+   * closes immediately and nothing depends on there being a connection. The
+   * queue is also what the screen renders from until the server confirms.
+   */
   async function saveScore(matchId: string, score1: number | null, score2: number | null) {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/tournaments/${tournament.id}/matches/${matchId}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ score1, score2 }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error ?? 'Не удалось сохранить счёт');
+    const entry: PendingScore = {
+      tournamentId: server.id,
+      matchId,
+      score1,
+      score2,
+      queuedAt: Date.now(),
+    };
+    const next = [...pending.filter((p) => p.matchId !== matchId), entry];
 
-      const updated = data.tournament as TournamentDetail;
-      setTournament(updated);
-      setEditingId(null);
-      // Finishing the last match is the moment the final table matters.
-      if (updated.status === 'finished') setTab('table');
-      router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось сохранить счёт');
-    } finally {
-      setBusy(false);
-    }
+    setError(null);
+    setEditingId(null);
+    setPending(next);
+    // Finishing the last match is the moment the final table matters.
+    if (applyPendingScores(server, next).status === 'finished') setTab('table');
+
+    await queueScore(entry);
+    await sync();
   }
 
   async function setClosed(closedEarly: boolean) {
@@ -94,12 +145,18 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
       if (!res.ok) throw new Error(data.error ?? 'Не удалось изменить статус турнира');
 
       const updated = data.tournament as TournamentDetail;
-      setTournament(updated);
+      setServer(updated);
       setConfirmFinish(false);
       setTab(updated.status === 'finished' ? 'table' : 'matches');
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось изменить статус турнира');
+      // Unlike a score, this one is not queued: closing a tournament is rare
+      // and can wait for a connection.
+      if (err instanceof TypeError) {
+        setError('Нет сети — статус турнира можно изменить только со связью');
+      } else {
+        setError(err instanceof Error ? err.message : 'Не удалось изменить статус турнира');
+      }
     } finally {
       setBusy(false);
     }
@@ -107,12 +164,17 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
 
   async function remove() {
     setBusy(true);
-    const res = await fetch(`/api/tournaments/${tournament.id}`, { method: 'DELETE' });
-    if (res.ok) {
+    try {
+      const res = await fetch(`/api/tournaments/${tournament.id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error();
       router.replace('/tournaments');
       router.refresh();
-    } else {
-      setError('Не удалось удалить турнир');
+    } catch (err) {
+      setError(
+        err instanceof TypeError
+          ? 'Нет сети — турнир можно удалить только со связью'
+          : 'Не удалось удалить турнир',
+      );
       setBusy(false);
     }
   }
@@ -191,6 +253,31 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
         ))}
       </div>
 
+      {(!online || pending.length > 0) && (
+        <div className="mb-4 rounded-2xl border border-warn/40 bg-warn/10 px-4 py-3">
+          <p className="text-sm font-semibold text-warn">
+            {online ? 'Счёт ещё не отправлен' : 'Нет сети'}
+          </p>
+          <p className="mt-0.5 text-sm text-muted">
+            {pending.length > 0
+              ? `${pending.length} ${plural(pending.length, 'результат', 'результата', 'результатов')} ` +
+                `${plural(pending.length, 'сохранён', 'сохранены', 'сохранены')} на этом устройстве ` +
+                'и уйдут на сервер сами, как только появится связь.'
+              : 'Счёт можно вносить дальше — он сохранится на устройстве и отправится сам.'}
+          </p>
+          {pending.length > 0 && online && (
+            <button
+              type="button"
+              onClick={() => void sync()}
+              disabled={syncing}
+              className="tap mt-3 w-full rounded-xl border border-warn/50 px-4 text-sm font-semibold text-warn disabled:opacity-40"
+            >
+              {syncing ? 'Отправляем…' : 'Отправить сейчас'}
+            </button>
+          )}
+        </div>
+      )}
+
       {error && (
         <p className="mb-4 rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-warn">
           {error}
@@ -221,10 +308,11 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                     const played = match.score1 !== null && match.score2 !== null;
                     const team1Won = played && match.score1! > match.score2!;
                     const team2Won = played && match.score2! > match.score1!;
+                    const unsent = pendingIds.has(match.id);
 
-                    const summary = played
-                      ? `счёт ${match.score1}:${match.score2}`
-                      : 'счёт не внесён';
+                    const summary =
+                      (played ? `счёт ${match.score1}:${match.score2}` : 'счёт не внесён') +
+                      (unsent ? ', ещё не отправлен' : '');
 
                     return (
                       <li key={match.id}>
@@ -244,8 +332,12 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                             <span className="rounded-md bg-court/20 px-2 py-0.5 text-[11px] font-semibold text-court">
                               Корт {match.court}
                             </span>
-                            {!played && (
-                              <span className="text-xs font-medium text-accent">Внести счёт</span>
+                            {unsent ? (
+                              <span className="text-xs font-medium text-warn">не отправлено</span>
+                            ) : (
+                              !played && (
+                                <span className="text-xs font-medium text-accent">Внести счёт</span>
+                              )
                             )}
                           </div>
 

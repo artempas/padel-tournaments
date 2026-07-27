@@ -1,9 +1,17 @@
 import type { Metadata, Viewport } from 'next';
+import ServiceWorkerRegistrar from '@/components/ServiceWorkerRegistrar';
 import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Падел Турниры',
   description: 'Американо-турниры по паделу: расписание, счёт и итоговая таблица',
+  manifest: '/manifest.webmanifest',
+  // iOS ignores the manifest and reads these instead.
+  appleWebApp: {
+    capable: true,
+    title: 'Падел',
+    statusBarStyle: 'default',
+  },
 };
 
 export const viewport: Viewport = {
@@ -37,7 +45,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        <ServiceWorkerRegistrar />
+      </body>
     </html>
   );
 }

@@ -12,7 +12,8 @@
     "db:migrate": "node --env-file=.env.local scripts/migrate.mjs",
     "test": "node --test \"tests/**/*.test.ts\"",
     "smoke": "node --env-file=.env.local scripts/smoke.mjs",
-    "seed:demo": "node --env-file=.env.local scripts/seed-demo.mjs"
+    "seed:demo": "node --env-file=.env.local scripts/seed-demo.mjs",
+    "icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
     "@simplewebauthn/browser": "^13.1.0",
