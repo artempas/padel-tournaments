@@ -172,6 +172,12 @@ model Tournament {
   courts         Int              @db.SmallInt
   pointsPerMatch Int              @map("points_per_match") @db.SmallInt
 
+  // Сколько раундов играть. Есть только у mexicano: там расписание строится
+  // по ходу дела, раунд за раундом, и само по себе не кончается. У американо
+  // длину задаёт «каждый с каждым», поэтому здесь NULL — за этим следит
+  // CHECK tournaments_rounds_planned_format.
+  roundsPlanned Int? @map("rounds_planned") @db.SmallInt
+
   // Статуса нет: он выводится из этих двух меток (вью tournament_overview).
   // completedAt — внесён счёт последнего матча; closedAt — завершён досрочно.
   // Обе идемпотентны и не сдвигаются при правке счёта.

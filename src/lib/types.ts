@@ -14,14 +14,19 @@ export interface Match {
   score2: number | null;
 }
 
-/** Пока генератор есть только у американо, но схема допускает и остальные. */
+/** Схема допускает и team_americano, но генератора у него пока нет. */
 export type TournamentFormat = 'americano' | 'mexicano' | 'team_americano';
+
+/** Форматы, которые приложение умеет составлять. */
+export type PlayableFormat = Extract<TournamentFormat, 'americano' | 'mexicano'>;
 
 export interface Tournament {
   id: string;
   name: string;
   courts: number;
   format: TournamentFormat;
+  /** Длина турнира в раундах — только у mexicano, у остальных null. */
+  roundsPlanned: number | null;
   pointsPerMatch: number;
   status: 'running' | 'finished';
   /** Finished by the organiser rather than by playing every match. */

@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import LogoutButton from '@/components/LogoutButton';
 import ThemeToggle from '@/components/ThemeToggle';
 import { getCurrentUser } from '@/lib/auth';
+import { formatLabel, tournamentSize } from '@/lib/formats';
 import { listRoster } from '@/lib/roster';
 import { listTournaments } from '@/lib/tournaments';
 
@@ -60,7 +61,10 @@ export default async function TournamentsPage() {
       ) : (
         <ul className="flex flex-col gap-3">
           {tournaments.map((t) => {
-            const progress = t.matchCount ? Math.round((t.playedCount / t.matchCount) * 100) : 0;
+            // Не matchCount: у мексикано матчи появляются по ходу турнира, и
+            // счётчик созданных всё время равнялся бы сыгранным.
+            const total = tournamentSize(t.format, t.playerCount, t.courts, t.roundsPlanned).matches;
+            const progress = total ? Math.round((t.playedCount / total) * 100) : 0;
             return (
               <li key={t.id}>
                 <Link href={`/tournaments/${t.id}`} className="card block p-4 transition active:scale-[0.99]">
@@ -75,14 +79,14 @@ export default async function TournamentsPage() {
                     >
                       {t.status !== 'finished'
                         ? 'Идёт'
-                        : t.playedCount < t.matchCount
+                        : t.playedCount < total
                           ? 'Завершён досрочно'
                           : 'Завершён'}
                     </span>
                   </div>
 
                   <p className="mt-1 text-sm text-muted">
-                    {t.playerCount} игроков · {t.courts}{' '}
+                    {formatLabel(t.format)} · {t.playerCount} игроков · {t.courts}{' '}
                     {t.courts === 1 ? 'корт' : t.courts < 5 ? 'корта' : 'кортов'} ·{' '}
                     {dateFormat.format(new Date(t.createdAt))}
                   </p>
@@ -92,7 +96,7 @@ export default async function TournamentsPage() {
                       <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }} />
                     </div>
                     <span className="shrink-0 text-xs tabular-nums text-muted">
-                      {t.playedCount}/{t.matchCount}
+                      {t.playedCount}/{total}
                     </span>
                   </div>
                 </Link>

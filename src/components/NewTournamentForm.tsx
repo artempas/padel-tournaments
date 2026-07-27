@@ -4,10 +4,13 @@ import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ThemeToggle from './ThemeToggle';
-import { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS, totalMatchesFor } from '@/lib/americano';
+import { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS } from '@/lib/americano';
+import { FORMAT_OPTIONS, tournamentSize } from '@/lib/formats';
+import { DEFAULT_ROUNDS, MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
 import { plural } from '@/lib/plural';
 import { randomTournamentName } from '@/lib/tournament-names';
 import type { RosterPlayer } from '@/lib/roster';
+import type { PlayableFormat } from '@/lib/types';
 
 export interface NewTournamentFormProps {
   /** Generated on the server so the first render matches the client. */
@@ -15,6 +18,8 @@ export interface NewTournamentFormProps {
   initialPlayers?: string[];
   initialCourts?: number;
   initialPointsPerMatch?: number;
+  initialFormat?: PlayableFormat;
+  initialRounds?: number;
   /** Everyone the organiser has entered before, for one-tap adding. */
   roster?: RosterPlayer[];
   /** Name of the tournament these players were copied from, if any. */
@@ -26,6 +31,8 @@ export default function NewTournamentForm({
   initialPlayers = [],
   initialCourts = 1,
   initialPointsPerMatch = 16,
+  initialFormat = 'americano',
+  initialRounds = DEFAULT_ROUNDS,
   roster = [],
   repeatedFrom = null,
 }: NewTournamentFormProps) {
@@ -35,6 +42,8 @@ export default function NewTournamentForm({
   const [draft, setDraft] = useState('');
   const [courts, setCourts] = useState(initialCourts);
   const [pointsPerMatch, setPointsPerMatch] = useState(initialPointsPerMatch);
+  const [format, setFormat] = useState<PlayableFormat>(initialFormat);
+  const [rounds, setRounds] = useState(initialRounds);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,9 +53,8 @@ export default function NewTournamentForm({
 
   const preview = useMemo(() => {
     if (players.length < MIN_PLAYERS) return null;
-    const matches = totalMatchesFor(players.length);
-    return { matches, rounds: Math.ceil(matches / effectiveCourts) };
-  }, [players.length, effectiveCourts]);
+    return tournamentSize(format, players.length, effectiveCourts, rounds);
+  }, [format, players.length, effectiveCourts, rounds]);
 
   const chosen = useMemo(
     () => new Set(players.map((p) => p.toLocaleLowerCase('ru'))),
@@ -98,6 +106,9 @@ export default function NewTournamentForm({
           players,
           courts: effectiveCourts,
           pointsPerMatch,
+          format,
+          // У американо длину задаёт состав — сервер такое поле проигнорирует.
+          ...(format === 'mexicano' ? { rounds } : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -153,6 +164,55 @@ export default function NewTournamentForm({
               </button>
             </div>
           </label>
+        </section>
+
+        <section className="card p-4">
+          <h2 className="mb-3 font-semibold">Формат</h2>
+
+          <div className="grid grid-cols-2 gap-1 rounded-xl bg-surface p-1">
+            {FORMAT_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setFormat(option.value)}
+                aria-pressed={format === option.value}
+                className={`tap rounded-lg px-3 text-sm font-semibold transition ${
+                  format === option.value ? 'bg-surface-2 text-text' : 'text-muted'
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="mt-3 text-xs leading-relaxed text-muted">
+            {FORMAT_OPTIONS.find((o) => o.value === format)?.hint}
+          </p>
+
+          {format === 'mexicano' && (
+            <div className="mt-4 border-t border-line pt-4">
+              <h3 className="mb-3 text-sm font-medium text-muted">Раундов</h3>
+              <div className="flex items-center gap-4">
+                <button
+                  type="button"
+                  onClick={() => setRounds((r) => Math.max(MIN_ROUNDS, r - 1))}
+                  disabled={rounds <= MIN_ROUNDS}
+                  className="tap w-14 rounded-xl border border-line text-xl font-bold disabled:opacity-30"
+                >
+                  −
+                </button>
+                <span className="flex-1 text-center text-3xl font-bold tabular-nums">{rounds}</span>
+                <button
+                  type="button"
+                  onClick={() => setRounds((r) => Math.min(MAX_ROUNDS, r + 1))}
+                  disabled={rounds >= MAX_ROUNDS}
+                  className="tap w-14 rounded-xl border border-line text-xl font-bold disabled:opacity-30"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="card p-4">

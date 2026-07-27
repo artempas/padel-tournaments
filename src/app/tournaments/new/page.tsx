@@ -5,6 +5,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { listRoster } from '@/lib/roster';
 import { loadTournament } from '@/lib/tournaments';
 import { randomTournamentName } from '@/lib/tournament-names';
+import type { PlayableFormat } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +24,8 @@ export default async function NewTournamentPage({
   let players: string[] | undefined;
   let courts: number | undefined;
   let pointsPerMatch: number | undefined;
+  let format: PlayableFormat | undefined;
+  let rounds: number | undefined;
   let repeatedFrom: string | null = null;
 
   if (from) {
@@ -31,6 +34,10 @@ export default async function NewTournamentPage({
       players = source.players.map((p) => p.name);
       courts = source.courts;
       pointsPerMatch = source.pointsPerMatch;
+      // team_americano в базе возможен, но составить его пока нечем — такой
+      // турнир повторяется американо, как и любой незнакомый формат.
+      format = source.format === 'mexicano' ? 'mexicano' : 'americano';
+      rounds = source.roundsPlanned ?? undefined;
       repeatedFrom = source.name;
     } catch (err) {
       // A stale or foreign link just falls back to an empty form.
@@ -45,6 +52,8 @@ export default async function NewTournamentPage({
       initialPlayers={players}
       initialCourts={courts}
       initialPointsPerMatch={pointsPerMatch}
+      initialFormat={format}
+      initialRounds={rounds}
       roster={roster}
       repeatedFrom={repeatedFrom}
     />

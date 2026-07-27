@@ -22,6 +22,7 @@ function tournament(over: Partial<TournamentDetail> = {}): TournamentDetail {
     name: 'Пятничный американо',
     courts: 1,
     format: 'americano',
+    roundsPlanned: null,
     pointsPerMatch: 16,
     status: 'running',
     closedEarly: false,
@@ -78,6 +79,32 @@ test('scoring the last match finishes the tournament without the server', () => 
   const result = applyPendingScores(server, [pending({})]);
 
   assert.equal(server.status, 'running');
+  assert.equal(result.status, 'finished');
+});
+
+test('a mexicano round ending is not the tournament ending', () => {
+  // Раунд 2 из 4 доигран, раунда 3 на устройстве ещё нет — он появится только
+  // с сервера. Без этой проверки последний счёт каждого раунда объявлял бы
+  // турнир завершённым и выбрасывал организатора в итоговую таблицу.
+  const server = tournament({
+    format: 'mexicano',
+    roundsPlanned: 4,
+    matches: [match({ id: 'm1', score1: 11, score2: 5 }), match({ id: 'm2', round: 2 })],
+  });
+  const result = applyPendingScores(server, [pending({ matchId: 'm2' })]);
+
+  assert.equal(result.matches[1].score1, 10, 'the score itself still lands');
+  assert.equal(result.status, 'running');
+});
+
+test('a mexicano ends when the last planned round is scored', () => {
+  const server = tournament({
+    format: 'mexicano',
+    roundsPlanned: 2,
+    matches: [match({ id: 'm1', score1: 11, score2: 5 }), match({ id: 'm2', round: 2 })],
+  });
+  const result = applyPendingScores(server, [pending({ matchId: 'm2' })]);
+
   assert.equal(result.status, 'finished');
 });
 

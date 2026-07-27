@@ -37,7 +37,16 @@ export function applyPendingScores(
     return entry ? { ...match, score1: entry.score1, score2: entry.score2 } : match;
   });
 
-  const done = tournament.closedEarly || matches.every((m) => m.score1 !== null);
+  // «Все известные матчи сыграны» — не то же самое, что «турнир окончен»:
+  // у мексикано следующий раунд собирает сервер, и до синхронизации его
+  // матчей на устройстве просто нет. Иначе последний счёт каждого раунда
+  // объявлял бы турнир завершённым.
+  const builtRounds = matches.reduce((max, m) => Math.max(max, m.round), 0);
+  const complete =
+    matches.every((m) => m.score1 !== null) &&
+    (tournament.roundsPlanned === null || builtRounds >= tournament.roundsPlanned);
+
+  const done = tournament.closedEarly || complete;
 
   return {
     ...tournament,

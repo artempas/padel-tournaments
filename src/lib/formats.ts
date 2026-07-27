@@ -1,0 +1,50 @@
+import { totalMatchesFor } from './americano.ts';
+import { matchesPerRound } from './mexicano.ts';
+import type { PlayableFormat, TournamentFormat } from './types';
+
+export interface FormatOption {
+  value: PlayableFormat;
+  label: string;
+  hint: string;
+}
+
+export const FORMAT_OPTIONS: FormatOption[] = [
+  {
+    value: 'americano',
+    label: 'Американо',
+    hint: 'Пары тасуются так, чтобы каждый сыграл с каждым. Длина турнира из этого и следует.',
+  },
+  {
+    value: 'mexicano',
+    label: 'Мексикано',
+    hint: 'Пары следующего раунда собираются по таблице: лидеры на первом корте, 1-й с 4-м против 2-го с 3-м. Раунд появляется, когда доигран предыдущий.',
+  },
+];
+
+export function formatLabel(format: TournamentFormat): string {
+  return FORMAT_OPTIONS.find((o) => o.value === format)?.label ?? format;
+}
+
+/**
+ * Сколько матчей и раундов будет в турнире.
+ *
+ * У американо это следствие состава, у мексикано — числа раундов, которое
+ * задаёт организатор. Считается одинаково и до старта (предпросмотр в форме),
+ * и после (прогресс в списке): у мексикано матчи создаются по ходу дела, и
+ * `matches.length` до конца турнира меньше настоящего итога.
+ */
+export function tournamentSize(
+  format: TournamentFormat,
+  playerCount: number,
+  courts: number,
+  roundsPlanned: number | null,
+): { matches: number; rounds: number } {
+  const perRound = Math.max(1, matchesPerRound(playerCount, courts));
+
+  if (format === 'mexicano' && roundsPlanned !== null) {
+    return { matches: perRound * roundsPlanned, rounds: roundsPlanned };
+  }
+
+  const matches = totalMatchesFor(playerCount);
+  return { matches, rounds: Math.ceil(matches / perRound) };
+}

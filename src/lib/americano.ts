@@ -15,6 +15,10 @@
  * local search, repeated many times, keeping the lowest-cost schedule.
  */
 
+// Расширение указано намеренно: тесты грузит node --test напрямую, без
+// сборщика, и разрешать './rng' по-бандлерски там некому.
+import { mulberry32, shuffle } from './rng.ts';
+
 export const MIN_PLAYERS = 4;
 export const MAX_PLAYERS = 32;
 export const MAX_COURTS = 16;
@@ -43,17 +47,6 @@ export interface Schedule {
   rounds: number;
   matchesPerRound: number;
   quality: ScheduleQuality;
-}
-
-/** Deterministic PRNG so the same seed always yields the same schedule. */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 // A repeated partnership is far worse than a repeated opponent.
@@ -118,15 +111,6 @@ function pickPool(s: State, need: number, rng: () => number): number[] {
   const key = order.map((i) => s.games[i] * 1000 - s.rest[i] * 10 + rng() * 5);
   order.sort((x, y) => key[x] - key[y]);
   return order.slice(0, need);
-}
-
-function shuffle<T>(arr: T[], rng: () => number): T[] {
-  const out = arr.slice();
-  for (let i = out.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    [out[i], out[j]] = [out[j], out[i]];
-  }
-  return out;
 }
 
 /** Greedy: repeatedly take an anchor player and find their cheapest foursome. */

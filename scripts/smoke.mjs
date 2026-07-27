@@ -313,6 +313,105 @@ try {
   await api(`/api/tournaments/${secondId}`, { method: 'DELETE' });
   await api(`/api/tournaments/${shouted.body.id}`, { method: 'DELETE' });
 
+  console.log('\nmexicano');
+  const badFormat = await api('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'x', players, courts: 1, format: 'team_americano' }),
+  });
+  check('rejects a format with no generator', () => assert.equal(badFormat.status, 400));
+
+  const badRounds = await api('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'x', players, courts: 1, format: 'mexicano', rounds: 0 }),
+  });
+  check('rejects a round count outside the allowed range', () =>
+    assert.equal(badRounds.status, 400));
+
+  const mex = await api('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke Mexicano',
+      players,
+      courts: 2,
+      pointsPerMatch: 16,
+      format: 'mexicano',
+      rounds: 4,
+    }),
+  });
+  check('mexicano tournament created', () => assert.equal(mex.status, 201));
+  const mexId = mex.body.id;
+
+  let mexDetail = (await api(`/api/tournaments/${mexId}`)).body.tournament;
+  check('the planned length comes back with the tournament', () => {
+    assert.equal(mexDetail.format, 'mexicano');
+    assert.equal(mexDetail.roundsPlanned, 4);
+  });
+  check('only the opening round exists at the start', () =>
+    assert.deepEqual([...new Set(mexDetail.matches.map((m) => m.round))], [1]));
+
+  // Точки за раунд подобраны так, чтобы верхняя половина таблицы читалась
+  // однозначно, без домысливания порядка внутри равных.
+  const pointsFor = new Map(mexDetail.players.map((p) => [p.id, 0]));
+  const topFourBefore = [];
+
+  for (let round = 1; round <= 4; round++) {
+    const matches = mexDetail.matches.filter((m) => m.round === round);
+    assert.equal(matches.length, 2, `round ${round} should fill both courts`);
+
+    let response;
+    for (const [index, m] of matches.entries()) {
+      const score1 = 16 - index * 2;
+      response = await api(`/api/tournaments/${mexId}/matches/${m.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ score1, score2: 16 - score1 }),
+      });
+      assert.equal(response.status, 200, `scoring round ${round}, court ${m.court} failed`);
+      for (const p of m.team1) pointsFor.set(p, pointsFor.get(p) + score1);
+      for (const p of m.team2) pointsFor.set(p, pointsFor.get(p) + (16 - score1));
+    }
+
+    mexDetail = response.body.tournament;
+
+    // Кто по очкам обязан оказаться на первом корте следующего раунда.
+    const ordered = [...pointsFor.entries()].sort((a, b) => b[1] - a[1]);
+    topFourBefore.push(new Set(ordered.slice(0, 4).map(([id]) => id)));
+
+    if (round < 4) {
+      check(`round ${round + 1} appears once round ${round} is scored`, () => {
+        assert.equal(mexDetail.matches.filter((m) => m.round === round + 1).length, 2);
+        assert.equal(mexDetail.status, 'running');
+      });
+      check(`round ${round + 1} puts the leading four on court 1`, () => {
+        const court1 = mexDetail.matches.find((m) => m.round === round + 1 && m.court === 1);
+        assert.deepEqual(
+          new Set([...court1.team1, ...court1.team2]),
+          topFourBefore[round - 1],
+        );
+      });
+      check(`round ${round + 1} pairs nobody twice`, () => {
+        const seats = mexDetail.matches
+          .filter((m) => m.round === round + 1)
+          .flatMap((m) => [...m.team1, ...m.team2]);
+        assert.equal(new Set(seats).size, seats.length);
+      });
+    }
+  }
+
+  check('no round is generated past the planned length', () =>
+    assert.equal(new Set(mexDetail.matches.map((m) => m.round)).size, 4));
+  check('the tournament finishes with the last planned round', () => {
+    assert.equal(mexDetail.status, 'finished');
+    assert.equal(mexDetail.closedEarly, false);
+    assert.ok(mexDetail.finishedAt);
+  });
+  const mexListed = (await api('/api/tournaments')).body.tournaments.find((t) => t.id === mexId);
+  check('the list carries the format and its planned length', () => {
+    assert.equal(mexListed.format, 'mexicano');
+    assert.equal(mexListed.roundsPlanned, 4);
+    assert.equal(mexListed.matchCount, 8);
+    assert.equal(mexListed.playedCount, 8);
+  });
+
   console.log('\nisolation');
   const otherUser = await client.query(
     'INSERT INTO users (username, username_key, display_name) VALUES ($1, $1, $1) RETURNING id',

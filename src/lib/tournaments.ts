@@ -1,11 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, parseUuid } from './api';
 import { generateAmericano, MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS } from './americano';
+import {
+  DEFAULT_ROUNDS,
+  firstRound,
+  MAX_ROUNDS,
+  MIN_ROUNDS,
+  nextRound,
+  type RoundMatch,
+} from './mexicano';
 import { normalizeKey } from './normalize';
 import { prisma } from './prisma';
 import { upsertPeople } from './roster';
+import { computeStandings } from './standings';
 import type {
   Match,
+  PlayableFormat,
   Player,
   TournamentDetail,
   TournamentFormat,
@@ -18,6 +28,8 @@ export interface CreateTournamentInput {
   players?: unknown;
   courts?: unknown;
   pointsPerMatch?: unknown;
+  format?: unknown;
+  rounds?: unknown;
 }
 
 interface ValidatedInput {
@@ -25,6 +37,9 @@ interface ValidatedInput {
   players: string[];
   courts: number;
   pointsPerMatch: number;
+  format: PlayableFormat;
+  /** Задана только у mexicano — см. CHECK tournaments_rounds_planned_format. */
+  rounds: number | null;
 }
 
 export function validateCreateInput(input: CreateTournamentInput): ValidatedInput {
@@ -58,7 +73,22 @@ export function validateCreateInput(input: CreateTournamentInput): ValidatedInpu
     throw new ApiError('Очков за матч должно быть от 1 до 200');
   }
 
-  return { name, players, courts, pointsPerMatch };
+  const format = input.format === undefined ? 'americano' : String(input.format);
+  if (format !== 'americano' && format !== 'mexicano') {
+    throw new ApiError('Формат турнира — «americano» или «mexicano»');
+  }
+
+  // Число раундов есть только у mexicano: у американо длину диктует
+  // «каждый с каждым», и назначать её со стороны нечему.
+  let rounds: number | null = null;
+  if (format === 'mexicano') {
+    rounds = input.rounds === undefined ? DEFAULT_ROUNDS : Number(input.rounds);
+    if (!Number.isInteger(rounds) || rounds < MIN_ROUNDS || rounds > MAX_ROUNDS) {
+      throw new ApiError(`Число раундов должно быть от ${MIN_ROUNDS} до ${MAX_ROUNDS}`);
+    }
+  }
+
+  return { name, players, courts, pointsPerMatch, format, rounds };
 }
 
 /**
@@ -78,12 +108,68 @@ function lifecycle(completedAt: Date | null, closedAt: Date | null) {
   };
 }
 
+/** Матч, расставленный по местам участников (seat), но ещё не записанный. */
+interface PlannedMatch {
+  round: number;
+  court: number;
+  team1: [number, number];
+  team2: [number, number];
+}
+
+function planRound(round: number, matches: RoundMatch[]): PlannedMatch[] {
+  return matches.map((m) => ({ round, court: m.court, team1: m.team1, team2: m.team2 }));
+}
+
+/**
+ * Пишет матчи вместе с участниками.
+ *
+ * id матчей генерируются здесь, чтобы участников можно было вставить одним
+ * createMany, не дожидаясь RETURNING. Триггер «ровно четверо» отложен до
+ * COMMIT, поэтому промежуточное состояние его не смущает.
+ */
+async function insertMatches(
+  tx: Prisma.TransactionClient,
+  tournamentId: string,
+  pointsPerMatch: number,
+  planned: PlannedMatch[],
+  playerIdAt: (seat: number) => string,
+): Promise<void> {
+  const rows = planned.map((m) => ({
+    id: randomUUID(),
+    tournamentId,
+    roundNo: m.round,
+    courtNo: m.court,
+    pointsSum: pointsPerMatch,
+  }));
+
+  await tx.match.createMany({ data: rows });
+
+  await tx.matchParticipant.createMany({
+    data: planned.flatMap((m, i) => {
+      const shared = { matchId: rows[i].id, tournamentId, roundNo: m.round };
+      return [
+        { ...shared, tournamentPlayerId: playerIdAt(m.team1[0]), side: 'a' as const, slot: 1 },
+        { ...shared, tournamentPlayerId: playerIdAt(m.team1[1]), side: 'a' as const, slot: 2 },
+        { ...shared, tournamentPlayerId: playerIdAt(m.team2[0]), side: 'b' as const, slot: 1 },
+        { ...shared, tournamentPlayerId: playerIdAt(m.team2[1]), side: 'b' as const, slot: 2 },
+      ];
+    }),
+  });
+}
+
 export async function createTournament(
   ownerId: string,
   input: CreateTournamentInput,
 ): Promise<string> {
-  const { name, players, courts, pointsPerMatch } = validateCreateInput(input);
-  const schedule = generateAmericano(players.length, courts);
+  const { name, players, courts, pointsPerMatch, format, rounds } = validateCreateInput(input);
+
+  // У американо расписание известно целиком заранее. У mexicano заранее
+  // известен только первый раунд — остальные достраиваются по таблице, по
+  // мере того как приходят результаты (см. extendMexicano).
+  const planned =
+    format === 'americano'
+      ? generateAmericano(players.length, courts).matches
+      : planRound(1, firstRound(players.length, courts));
 
   return prisma.$transaction(async (tx) => {
     // Everyone entered here joins the organiser's permanent roster, which is
@@ -98,7 +184,8 @@ export async function createTournament(
         name,
         courts,
         pointsPerMatch,
-        format: 'americano',
+        format,
+        roundsPlanned: rounds,
         players: {
           create: players.map((playerName, seat) => ({
             seat,
@@ -110,36 +197,8 @@ export async function createTournament(
     });
 
     const bySeat = new Map(tournament.players.map((p) => [p.seat, p.id]));
-    const seatId = (index: number): string => bySeat.get(index)!;
 
-    // id матчей генерируются здесь, чтобы участников можно было вставить одним
-    // createMany, не дожидаясь RETURNING. Триггер «ровно четверо» отложен до
-    // COMMIT, поэтому промежуточное состояние его не смущает.
-    const matches = schedule.matches.map((m) => ({
-      id: randomUUID(),
-      tournamentId: tournament.id,
-      roundNo: m.round,
-      courtNo: m.court,
-      pointsSum: pointsPerMatch,
-    }));
-
-    await tx.match.createMany({ data: matches });
-
-    await tx.matchParticipant.createMany({
-      data: schedule.matches.flatMap((m, i) => {
-        const shared = {
-          matchId: matches[i].id,
-          tournamentId: tournament.id,
-          roundNo: m.round,
-        };
-        return [
-          { ...shared, tournamentPlayerId: seatId(m.team1[0]), side: 'a' as const, slot: 1 },
-          { ...shared, tournamentPlayerId: seatId(m.team1[1]), side: 'a' as const, slot: 2 },
-          { ...shared, tournamentPlayerId: seatId(m.team2[0]), side: 'b' as const, slot: 1 },
-          { ...shared, tournamentPlayerId: seatId(m.team2[1]), side: 'b' as const, slot: 2 },
-        ];
-      }),
-    });
+    await insertMatches(tx, tournament.id, pointsPerMatch, planned, (seat) => bySeat.get(seat)!);
 
     return tournament.id;
   });
@@ -150,6 +209,7 @@ interface OverviewRow {
   name: string;
   courts: number;
   format: TournamentFormat;
+  rounds_planned: number | null;
   points_per_match: number;
   completed_at: Date | null;
   closed_at: Date | null;
@@ -165,7 +225,7 @@ interface OverviewRow {
  */
 export async function listTournaments(ownerId: string): Promise<TournamentSummary[]> {
   const rows = await prisma.$queryRaw<OverviewRow[]>`
-    SELECT id, name, courts, format, points_per_match,
+    SELECT id, name, courts, format, rounds_planned, points_per_match,
            completed_at, closed_at, created_at,
            player_count, match_count, played_count
       FROM tournament_overview
@@ -178,6 +238,7 @@ export async function listTournaments(ownerId: string): Promise<TournamentSummar
     name: r.name,
     courts: r.courts,
     format: r.format,
+    roundsPlanned: r.rounds_planned,
     pointsPerMatch: r.points_per_match,
     createdAt: r.created_at.toISOString(),
     ...lifecycle(r.completed_at, r.closed_at),
@@ -187,40 +248,28 @@ export async function listTournaments(ownerId: string): Promise<TournamentSummar
   }));
 }
 
-export async function loadTournament(id: string, ownerId: string): Promise<TournamentDetail> {
-  const tournamentId = parseUuid(id, 'Турнир не найден');
-
-  const t = await prisma.tournament.findFirst({
-    where: { id: tournamentId, ownerId },
+/** Игроки и матчи в той форме, в которой их ждут клиент и computeStandings. */
+const BOARD_SELECT = {
+  players: {
+    select: { id: true, seat: true, person: { select: { name: true } } },
+    orderBy: { seat: 'asc' },
+  },
+  matches: {
     select: {
       id: true,
-      name: true,
-      courts: true,
-      format: true,
-      pointsPerMatch: true,
-      completedAt: true,
-      closedAt: true,
-      createdAt: true,
-      players: {
-        select: { id: true, seat: true, person: { select: { name: true } } },
-        orderBy: { seat: 'asc' },
-      },
-      matches: {
-        select: {
-          id: true,
-          roundNo: true,
-          courtNo: true,
-          scoreA: true,
-          scoreB: true,
-          participants: { select: { tournamentPlayerId: true, side: true, slot: true } },
-        },
-        orderBy: [{ roundNo: 'asc' }, { courtNo: 'asc' }],
-      },
+      roundNo: true,
+      courtNo: true,
+      scoreA: true,
+      scoreB: true,
+      participants: { select: { tournamentPlayerId: true, side: true, slot: true } },
     },
-  });
+    orderBy: [{ roundNo: 'asc' }, { courtNo: 'asc' }],
+  },
+} satisfies Prisma.TournamentSelect;
 
-  if (!t) throw new ApiError('Турнир не найден', 404);
+type BoardRows = Prisma.TournamentGetPayload<{ select: typeof BOARD_SELECT }>;
 
+function readBoard(t: BoardRows): { players: Player[]; matches: Match[] } {
   const players: Player[] = t.players.map((p) => ({
     id: p.id,
     name: p.person.name,
@@ -244,16 +293,40 @@ export async function loadTournament(id: string, ownerId: string): Promise<Tourn
     };
   });
 
+  return { players, matches };
+}
+
+export async function loadTournament(id: string, ownerId: string): Promise<TournamentDetail> {
+  const tournamentId = parseUuid(id, 'Турнир не найден');
+
+  const t = await prisma.tournament.findFirst({
+    where: { id: tournamentId, ownerId },
+    select: {
+      id: true,
+      name: true,
+      courts: true,
+      format: true,
+      roundsPlanned: true,
+      pointsPerMatch: true,
+      completedAt: true,
+      closedAt: true,
+      createdAt: true,
+      ...BOARD_SELECT,
+    },
+  });
+
+  if (!t) throw new ApiError('Турнир не найден', 404);
+
   return {
     id: t.id,
     name: t.name,
     courts: t.courts,
     format: t.format,
+    roundsPlanned: t.roundsPlanned,
     pointsPerMatch: t.pointsPerMatch,
     createdAt: t.createdAt.toISOString(),
     ...lifecycle(t.completedAt, t.closedAt),
-    players,
-    matches,
+    ...readBoard(t),
   };
 }
 
@@ -302,10 +375,64 @@ export async function setMatchScore(
     });
     if (updated.count === 0) throw new ApiError('Матч не найден', 404);
 
+    // Порядок важен: пока следующий раунд не создан, недоигранных матчей нет,
+    // и турнир на секунду выглядел бы завершённым.
+    await extendMexicano(tx, tid);
     await refreshCompletion(tx, tid);
   });
 
   return loadTournament(tid, ownerId);
+}
+
+/**
+ * Достраивает следующий раунд mexicano, когда текущий доигран целиком.
+ *
+ * В этом и весь формат: пары следующего раунда — функция от таблицы, поэтому
+ * раньше последнего результата их не существует. Отсюда же и то, чего здесь
+ * нет: уже созданный раунд не пересобирается, даже если организатор потом
+ * поправит счёт задним числом. Люди к этому моменту стоят на кортах, и менять
+ * составы под ними — хуже, чем оставить раунд, собранный по прежней таблице.
+ *
+ * Для американо это no-op: его расписание целиком создано при старте.
+ */
+async function extendMexicano(
+  tx: Prisma.TransactionClient,
+  tournamentId: string,
+): Promise<void> {
+  // Сначала дешёвая проверка формата: у американо расписание уже целиком в
+  // базе, и тащить его сюда на каждый внесённый счёт незачем.
+  const t = await tx.tournament.findUnique({
+    where: { id: tournamentId },
+    select: { format: true, courts: true, pointsPerMatch: true, roundsPlanned: true },
+  });
+
+  if (!t || t.format !== 'mexicano' || t.roundsPlanned === null) return;
+
+  const board = await tx.tournament.findUniqueOrThrow({
+    where: { id: tournamentId },
+    select: BOARD_SELECT,
+  });
+  const { players, matches } = readBoard(board);
+  const lastRound = matches.reduce((max, m) => Math.max(max, m.round), 0);
+
+  if (lastRound >= t.roundsPlanned) return;
+  if (matches.some((m) => m.round === lastRound && m.score1 === null)) return;
+
+  // Тот же порядок, что видит организатор в таблице: пары следующего раунда
+  // должны читаться прямо с экрана.
+  const standings = computeStandings(players, matches);
+  const round = nextRound(
+    standings.map((row) => row.played),
+    t.courts,
+  );
+
+  await insertMatches(
+    tx,
+    tournamentId,
+    t.pointsPerMatch,
+    planRound(lastRound + 1, round),
+    (place) => standings[place].playerId,
+  );
 }
 
 /**

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
 import ThemeToggle from './ThemeToggle';
+import { formatLabel, tournamentSize } from '@/lib/formats';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
 import { applyPendingScores, type PendingScore } from '@/lib/pending-scores';
 import { plural } from '@/lib/plural';
@@ -96,7 +97,14 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
   );
 
   const playedCount = tournament.matches.filter((m) => m.score1 !== null).length;
-  const total = tournament.matches.length;
+  // У мексикано матчи создаются раунд за раундом, поэтому длину турнира
+  // приходится считать, а не брать из уже созданного.
+  const total = tournamentSize(
+    tournament.format,
+    tournament.players.length,
+    tournament.courts,
+    tournament.roundsPlanned,
+  ).matches;
   const remaining = total - playedCount;
   const isFinished = tournament.status === 'finished';
   // "Early" only while something is genuinely left unplayed — an organiser who
@@ -193,6 +201,12 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
           <h1 className="min-w-0 flex-1 truncate text-xl font-bold">{tournament.name}</h1>
           <ThemeToggle />
         </div>
+
+        <p className="mb-2 text-xs uppercase tracking-wide text-muted">
+          {formatLabel(tournament.format)}
+          {tournament.roundsPlanned !== null &&
+            ` · ${tournament.roundsPlanned} ${plural(tournament.roundsPlanned, 'раунд', 'раунда', 'раундов')}`}
+        </p>
 
         <div className="flex items-center gap-3">
           <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface">
@@ -375,6 +389,16 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             );
           })}
 
+          {!isFinished &&
+            tournament.roundsPlanned !== null &&
+            rounds.length < tournament.roundsPlanned && (
+              <p className="text-xs leading-relaxed text-muted">
+                Раунд {rounds.length + 1} из {tournament.roundsPlanned} соберётся по таблице,
+                когда будут внесены счета всех матчей текущего
+                {pending.length > 0 ? ' и уйдут на сервер.' : '.'}
+              </p>
+            )}
+
           {!isFinished && remaining > 0 && (
             <div className="pt-1">
               {confirmFinish ? (
@@ -449,6 +473,9 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
           <p className="text-xs leading-relaxed text-muted">
             Очки — сумма всех очков, набранных игроком во всех его матчах. При равенстве выше тот,
             у кого лучше разница очков, затем — больше побед.
+            {tournament.format === 'mexicano' &&
+              ' По этому же порядку собирается следующий раунд: первая четвёрка играет на первом' +
+                ' корте, первый с четвёртым против второго с третьим.'}
           </p>
 
           <Link
