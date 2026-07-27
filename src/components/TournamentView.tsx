@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
+import ShareResultsSheet from './ShareResultsSheet';
 import ThemeToggle from './ThemeToggle';
 import { formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
@@ -11,6 +12,7 @@ import { useOptimisticState } from '@/lib/optimistic';
 import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending-scores';
 import { plural } from '@/lib/plural';
 import { failureMessage, request } from '@/lib/request';
+import type { ResultsCardData } from '@/lib/results-card';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
@@ -46,6 +48,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFinish, setConfirmFinish] = useState(false);
+  const [sharing, setSharing] = useState(false);
 
   const tournament = useMemo(() => applyPendingScores(server, pending), [server, pending]);
   const pendingIds = useMemo(() => new Set(pending.map((p) => p.matchId)), [pending]);
@@ -159,6 +162,30 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
   );
 
   const editing = editingId ? (tournament.matches.find((m) => m.id === editingId) ?? null) : null;
+
+  // Картинку пересобирать на каждый рендер незачем — шторка рисует её по этому
+  // объекту, поэтому он должен меняться только вместе с результатами.
+  const shareData = useMemo<ResultsCardData>(
+    () => ({
+      name: tournament.name,
+      format: formatLabel(tournament.format),
+      date: tournament.finishedAt ?? tournament.createdAt,
+      finished: isFinished,
+      playedCount,
+      totalMatches: total,
+      standings,
+    }),
+    [
+      tournament.name,
+      tournament.format,
+      tournament.finishedAt,
+      tournament.createdAt,
+      isFinished,
+      playedCount,
+      total,
+      standings,
+    ],
+  );
 
   /**
    * The score is written to the local queue first and sent second, so the sheet
@@ -574,6 +601,16 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                 ' корте, первый с четвёртым против второго с третьим.'}
           </p>
 
+          {playedCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setSharing(true)}
+              className="tap rounded-xl border border-line px-4 font-semibold"
+            >
+              Поделиться картинкой
+            </button>
+          )}
+
           <Link
             href={`/tournaments/new?from=${tournament.id}`}
             className="tap flex items-center justify-center rounded-xl bg-accent px-4 font-bold text-accent-ink"
@@ -625,6 +662,8 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
           onClose={() => setEditingId(null)}
         />
       )}
+
+      {sharing && <ShareResultsSheet data={shareData} onClose={() => setSharing(false)} />}
     </main>
   );
 }
