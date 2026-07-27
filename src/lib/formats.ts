@@ -48,3 +48,28 @@ export function tournamentSize(
   const matches = totalMatchesFor(playerCount);
   return { matches, rounds: Math.ceil(matches / perRound) };
 }
+
+/**
+ * Раунды, которых ещё нет в базе.
+ *
+ * У мексикано пары — функция от таблицы, поэтому раньше времени их не
+ * существует. Но сколько раундов впереди и сколько кортов займёт каждый,
+ * известно с самого начала, и это стоит показать: расписание видно целиком,
+ * просто у будущих матчей вместо составов пусто.
+ */
+export function upcomingRounds(
+  format: TournamentFormat,
+  playerCount: number,
+  courts: number,
+  roundsPlanned: number | null,
+  builtRounds: number,
+): Array<{ round: number; matches: number }> {
+  if (format !== 'mexicano' || roundsPlanned === null) return [];
+
+  const perRound = matchesPerRound(playerCount, courts);
+  const pending: Array<{ round: number; matches: number }> = [];
+  for (let round = builtRounds + 1; round <= roundsPlanned; round++) {
+    pending.push({ round, matches: perRound });
+  }
+  return pending;
+}

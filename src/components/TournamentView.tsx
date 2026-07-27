@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
 import ThemeToggle from './ThemeToggle';
-import { formatLabel, tournamentSize } from '@/lib/formats';
+import { formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
 import { useOptimisticState } from '@/lib/optimistic';
 import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending-scores';
@@ -134,6 +134,29 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
   const finishedEarly = isFinished && remaining > 0;
   const currentRound =
     rounds.find(([, matches]) => matches.some((m) => m.score1 === null))?.[0] ?? null;
+
+  // Раунды, которые уже стоят в расписании, но составов у них ещё нет.
+  // Завершённому турниру их показывать не за чем — играть больше нечего.
+  const upcoming = useMemo(
+    () =>
+      isFinished
+        ? []
+        : upcomingRounds(
+            tournament.format,
+            tournament.players.length,
+            tournament.courts,
+            tournament.roundsPlanned,
+            rounds.length > 0 ? rounds[rounds.length - 1][0] : 0,
+          ),
+    [
+      isFinished,
+      tournament.format,
+      tournament.players.length,
+      tournament.courts,
+      tournament.roundsPlanned,
+      rounds,
+    ],
+  );
 
   const editing = editingId ? (tournament.matches.find((m) => m.id === editingId) ?? null) : null;
 
@@ -432,15 +455,46 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             );
           })}
 
-          {!isFinished &&
-            tournament.roundsPlanned !== null &&
-            rounds.length < tournament.roundsPlanned && (
-              <p className="text-xs leading-relaxed text-muted">
-                Раунд {rounds.length + 1} из {tournament.roundsPlanned} соберётся по таблице,
-                когда будут внесены счета всех матчей текущего
-                {pending.length > 0 ? ' и уйдут на сервер.' : '.'}
-              </p>
-            )}
+          {upcoming.map(({ round, matches }, index) => (
+            <section key={`upcoming-${round}`}>
+              <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-muted">
+                Раунд {round}
+              </h2>
+
+              <ul className="flex flex-col gap-2">
+                {Array.from({ length: matches }, (_, i) => i + 1).map((court) => (
+                  <li key={court}>
+                    <div className="card p-3">
+                      <div className="mb-2 flex items-center gap-2">
+                        <span className="rounded-md bg-court/20 px-2 py-0.5 text-[11px] font-semibold text-court">
+                          Корт {court}
+                        </span>
+                        <span className="sr-only">составы будут известны позже</span>
+                      </div>
+
+                      {/* Пустые места вместо имён: соперники ещё не определены. */}
+                      <div className="flex items-center gap-3" aria-hidden="true">
+                        <span className="h-3 min-w-0 flex-1 rounded-full border border-dashed border-line" />
+                        <span className="shrink-0 text-center text-base font-bold tabular-nums text-muted">
+                          –  :  –
+                        </span>
+                        <span className="h-3 min-w-0 flex-1 rounded-full border border-dashed border-line" />
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+
+              {index === 0 && (
+                <p className="mt-2 text-xs leading-relaxed text-muted">
+                  {currentRound !== null
+                    ? `Составы соберутся по таблице, когда будут внесены счета всех матчей раунда ${currentRound}` +
+                      (pending.length > 0 ? ' и уйдут на сервер.' : '.')
+                    : 'Составы соберутся по таблице, когда результаты уйдут на сервер.'}
+                </p>
+              )}
+            </section>
+          ))}
 
           {!isFinished && remaining > 0 && (
             <div className="pt-1">
