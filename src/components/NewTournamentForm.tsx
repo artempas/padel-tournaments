@@ -6,6 +6,7 @@ import Link from 'next/link';
 import ThemeToggle from './ThemeToggle';
 import { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS, totalMatchesFor } from '@/lib/americano';
 import { plural } from '@/lib/plural';
+import { failureMessage, request } from '@/lib/request';
 import { randomTournamentName } from '@/lib/tournament-names';
 import type { RosterPlayer } from '@/lib/roster';
 
@@ -90,9 +91,10 @@ export default function NewTournamentForm({
 
     setBusy(true);
     try {
-      const res = await fetch('/api/tournaments', {
+      // Единственное создание, которое ждёт ответа: id и расписание рождаются
+      // на сервере, и показывать турнир до этого просто нечем.
+      const { id } = await request<{ id: string }>('/api/tournaments', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           name: name.trim() || 'Турнир',
           players,
@@ -100,12 +102,16 @@ export default function NewTournamentForm({
           pointsPerMatch,
         }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error ?? 'Не удалось создать турнир');
-      router.replace(`/tournaments/${data.id}`);
+      router.replace(`/tournaments/${id}`);
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось создать турнир');
+      setError(
+        failureMessage(
+          err,
+          'Не удалось создать турнир',
+          'Нет сети — расписание составляется на сервере, нужна связь',
+        ),
+      );
       setBusy(false);
     }
   }

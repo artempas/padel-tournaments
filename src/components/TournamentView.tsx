@@ -6,12 +6,21 @@ import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
 import ThemeToggle from './ThemeToggle';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
+import { useOptimisticState } from '@/lib/optimistic';
 import { applyPendingScores, type PendingScore } from '@/lib/pending-scores';
 import { plural } from '@/lib/plural';
+import { failureMessage, request } from '@/lib/request';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
 type Tab = 'matches' | 'table';
+
+/**
+ * Удаление уводит с экрана раньше ответа сервера, поэтому об отказе некому
+ * рассказать: компонента уже нет. Модуль живёт дольше — он и передаёт ошибку
+ * турниру, на который пользователя вернули.
+ */
+let failedDelete: { tournamentId: string; message: string } | null = null;
 
 function teamName(ids: [string, string], playersById: Map<string, Player>): string {
   return ids.map((id) => playersById.get(id)?.name ?? '—').join(' / ');
@@ -19,16 +28,21 @@ function teamName(ids: [string, string], playersById: Map<string, Player>): stri
 
 export default function TournamentView({ initial }: { initial: TournamentDetail }) {
   const router = useRouter();
-  // `server` is the last state the server confirmed; `tournament` is that with
-  // the offline queue laid on top — which is what the organiser actually sees.
-  const [server, setServer] = useState(initial);
+  // `server` is the tournament as far as the organiser is concerned — server
+  // state plus changes that are on the screen but not yet confirmed;
+  // `tournament` is that with the offline score queue laid on top.
+  const {
+    value: server,
+    error,
+    mutate,
+    set: setServer,
+    setError,
+  } = useOptimisticState(initial);
   const [pending, setPending] = useState<PendingScore[]>([]);
   const [online, setOnline] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [tab, setTab] = useState<Tab>(initial.status === 'finished' ? 'table' : 'matches');
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFinish, setConfirmFinish] = useState(false);
 
@@ -49,7 +63,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
     } finally {
       setSyncing(false);
     }
-  }, [initial.id, router]);
+  }, [initial.id, router, setServer, setError]);
 
   // Scores left over from a previous visit — the tab may have been closed with
   // no connection — are shown at once and sent as soon as there is one.
@@ -60,6 +74,14 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
     setOnline(navigator.onLine);
     if (navigator.onLine) void sync();
   }, [initial.id, sync]);
+
+  // A deletion the server refused: the organiser is back on the tournament and
+  // is owed the reason.
+  useEffect(() => {
+    if (failedDelete?.tournamentId !== initial.id) return;
+    setError(failedDelete.message);
+    failedDelete = null;
+  }, [initial.id, setError]);
 
   useEffect(() => {
     const goOnline = () => {
@@ -132,51 +154,75 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
     await sync();
   }
 
-  async function setClosed(closedEarly: boolean) {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/tournaments/${tournament.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ closedEarly }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error ?? 'Не удалось изменить статус турнира');
+  /**
+   * Завершение и возврат в игру переключают экран сразу: ждать ответа, чтобы
+   * увидеть итоговую таблицу, незачем. В очередь, в отличие от счёта, это не
+   * попадает — действие редкое, и при отказе всё вернётся как было.
+   */
+  function setClosed(closedEarly: boolean) {
+    const before = server;
 
-      const updated = data.tournament as TournamentDetail;
-      setServer(updated);
-      setConfirmFinish(false);
-      setTab(updated.status === 'finished' ? 'table' : 'matches');
-      router.refresh();
-    } catch (err) {
-      // Unlike a score, this one is not queued: closing a tournament is rare
-      // and can wait for a connection.
-      if (err instanceof TypeError) {
-        setError('Нет сети — статус турнира можно изменить только со связью');
-      } else {
-        setError(err instanceof Error ? err.message : 'Не удалось изменить статус турнира');
-      }
-    } finally {
-      setBusy(false);
-    }
+    setConfirmFinish(false);
+    setTab(
+      closedEarly || tournament.matches.every((m) => m.score1 !== null) ? 'table' : 'matches',
+    );
+
+    mutate({
+      next: (t) => {
+        const finished = closedEarly || t.matches.every((m) => m.score1 !== null);
+        return {
+          ...t,
+          closedEarly,
+          // Статус выводится так же, как на сервере — во вью tournament_overview.
+          status: finished ? 'finished' : 'running',
+          // Точную метку поставит сервер, здесь она лишь чтобы состояние не
+          // противоречило само себе.
+          finishedAt: finished ? (t.finishedAt ?? new Date().toISOString()) : null,
+        };
+      },
+      undo: (t) => ({
+        ...t,
+        closedEarly: before.closedEarly,
+        status: before.status,
+        finishedAt: before.finishedAt,
+      }),
+      send: async () => {
+        const data = await request<{ tournament: TournamentDetail }>(
+          `/api/tournaments/${before.id}`,
+          { method: 'PATCH', body: JSON.stringify({ closedEarly }) },
+        );
+        router.refresh();
+        return data.tournament;
+      },
+      message: 'Не удалось изменить статус турнира',
+      offline: 'Нет сети — статус турнира можно изменить только со связью',
+    });
   }
 
-  async function remove() {
-    setBusy(true);
-    try {
-      const res = await fetch(`/api/tournaments/${tournament.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error();
-      router.replace('/tournaments');
-      router.refresh();
-    } catch (err) {
-      setError(
-        err instanceof TypeError
-          ? 'Нет сети — турнир можно удалить только со связью'
-          : 'Не удалось удалить турнир',
-      );
-      setBusy(false);
-    }
+  /**
+   * Экран удалённого турнира не нужен, поэтому «сразу» здесь — это уйти в
+   * список, не дожидаясь ответа. Откатывать нечего: если сервер откажет,
+   * пользователя вернут на турнир вместе с объяснением.
+   */
+  function remove() {
+    const id = server.id;
+    router.replace('/tournaments');
+
+    request(`/api/tournaments/${id}`, { method: 'DELETE' }).then(
+      // Список приходит с сервера — его надо перечитать уже без турнира.
+      () => router.refresh(),
+      (err: unknown) => {
+        failedDelete = {
+          tournamentId: id,
+          message: failureMessage(
+            err,
+            'Не удалось удалить турнир',
+            'Нет сети — турнир можно удалить только со связью',
+          ),
+        };
+        router.replace(`/tournaments/${id}`);
+      },
+    );
   }
 
   return (
@@ -224,8 +270,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             <button
               type="button"
               onClick={() => setClosed(false)}
-              disabled={busy}
-              className="tap mt-3 w-full rounded-xl border border-accent/50 px-4 text-sm font-semibold text-accent disabled:opacity-40"
+              className="tap mt-3 w-full rounded-xl border border-accent/50 px-4 text-sm font-semibold text-accent"
             >
               Продолжить турнир
             </button>
@@ -388,8 +433,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                     <button
                       type="button"
                       onClick={() => setClosed(true)}
-                      disabled={busy}
-                      className="tap flex-1 rounded-xl bg-accent px-4 font-bold text-accent-ink disabled:opacity-40"
+                      className="tap flex-1 rounded-xl bg-accent px-4 font-bold text-accent-ink"
                     >
                       Завершить
                     </button>
@@ -466,8 +510,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                   <button
                     type="button"
                     onClick={remove}
-                    disabled={busy}
-                    className="tap flex-1 rounded-xl bg-warn px-4 font-bold text-ink disabled:opacity-40"
+                    className="tap flex-1 rounded-xl bg-warn px-4 font-bold text-ink"
                   >
                     Удалить
                   </button>
@@ -498,7 +541,6 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
           match={editing}
           playersById={playersById}
           pointsPerMatch={tournament.pointsPerMatch}
-          busy={busy}
           onSave={(s1, s2) => saveScore(editing.id, s1, s2)}
           onClear={() => saveScore(editing.id, null, null)}
           onClose={() => setEditingId(null)}
