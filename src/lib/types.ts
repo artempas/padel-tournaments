@@ -1,3 +1,5 @@
+import type { Rating } from './rating';
+
 export interface Player {
   id: string;
   name: string;
@@ -38,6 +40,14 @@ export interface Tournament {
 export interface TournamentDetail extends Tournament {
   players: Player[];
   matches: Match[];
+  /**
+   * Рейтинг участников на начало турнира, по Player.id.
+   *
+   * Отсюда клиент сам считает, сколько турнир кому принёс: прогоняет свои
+   * матчи через `computeRatings` поверх этого состояния. Поэтому дельта
+   * пересчитывается сразу при вводе счёта и живёт без сети — как и таблица.
+   */
+  ratingBefore: Record<string, Rating>;
 }
 
 export interface TournamentSummary extends Tournament {

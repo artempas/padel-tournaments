@@ -12,6 +12,14 @@
   --color-court: #2f7de1;
   --color-warn: #ffb340;
 
+  /* Ступени рейтинга. Цвет здесь — единственный носитель смысла в тесной
+     строке таблицы, поэтому взяты узнаваемые металлы, а не палитра приложения. */
+  --color-bronze: #cd8a52;
+  --color-silver: #a8b8cc;
+  --color-gold: #f0c04a;
+  --color-platinum: #6fd7d0;
+  --color-diamond: #7ab8ff;
+
   --radius-card: 1rem;
 }
 
@@ -27,6 +35,13 @@
     --color-accent-ink: #f8fbec;
     --color-court: #2563eb;
     --color-warn: #b45309;
+
+    /* Те же металлы, притемнённые: на светлом фоне исходные не читаются. */
+    --color-bronze: #96551f;
+    --color-silver: #5c6b80;
+    --color-gold: #97701a;
+    --color-platinum: #1c7d76;
+    --color-diamond: #1d63b8;
   }
 
   html {

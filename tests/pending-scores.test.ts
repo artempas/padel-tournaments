@@ -35,6 +35,7 @@ function tournament(over: Partial<TournamentDetail> = {}): TournamentDetail {
       { id: 'd', name: 'Гена', seat: 3 },
     ],
     matches: [match({ id: 'm1' }), match({ id: 'm2', round: 2 })],
+    ratingBefore: {},
     ...over,
   };
 }

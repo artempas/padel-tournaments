@@ -14,6 +14,7 @@ import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending
 import { plural } from '@/lib/plural';
 import { failureMessage, request } from '@/lib/request';
 import type { ResultsCardData } from '@/lib/results-card';
+import { computeRatings, type RatedMatch } from '@/lib/rating';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
@@ -123,6 +124,27 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
     () => computeStandings(tournament.players, tournament.matches),
     [tournament.players, tournament.matches],
   );
+
+  /**
+   * Сколько турнир принёс каждому — считается здесь, а не на сервере: матчи
+   * приходят в порядке раундов, стартовое состояние сервер уже прислал, и
+   * этого достаточно. Зато дельта пересчитывается прямо при вводе счёта, вместе
+   * с таблицей, и одинаково работает с очередью неотправленных результатов.
+   */
+  const ratingDelta = useMemo(() => {
+    const played: RatedMatch[] = tournament.matches
+      .filter((m) => m.score1 !== null && m.score2 !== null)
+      .map((m) => ({ teamA: m.team1, teamB: m.team2, scoreA: m.score1!, scoreB: m.score2! }));
+
+    const after = computeRatings(played, Object.entries(tournament.ratingBefore));
+
+    return new Map(
+      [...after].map(([id, r]) => [
+        id,
+        Math.round(r.rating) - Math.round(tournament.ratingBefore[id]?.rating ?? r.rating),
+      ]),
+    );
+  }, [tournament.matches, tournament.ratingBefore]);
 
   const playedCount = tournament.matches.filter((m) => m.score1 !== null).length;
   // У мексикано матчи создаются раунд за раундом, поэтому длину турнира
@@ -711,7 +733,23 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                   }`}
                 >
                   <span className="text-sm font-bold tabular-nums text-muted">{index + 1}</span>
-                  <span className="min-w-0 truncate text-sm font-medium">{row.name}</span>
+                  <span className="flex min-w-0 items-baseline gap-1.5">
+                    <span className="truncate text-sm font-medium">{row.name}</span>
+                    {/* Своей колонки дельта не получает: на телефоне их и так
+                        пять, а рядом с именем она читается как подпись. */}
+                    {(ratingDelta.get(row.playerId) ?? 0) !== 0 && (
+                      <span
+                        className={`shrink-0 text-[11px] font-semibold tabular-nums ${
+                          ratingDelta.get(row.playerId)! > 0 ? 'text-accent' : 'text-muted'
+                        }`}
+                        title="Изменение рейтинга за турнир"
+                      >
+                        {ratingDelta.get(row.playerId)! > 0
+                          ? `+${ratingDelta.get(row.playerId)}`
+                          : ratingDelta.get(row.playerId)}
+                      </span>
+                    )}
+                  </span>
                   <span className="text-right text-base font-bold tabular-nums">
                     {row.pointsFor}
                   </span>
@@ -726,7 +764,8 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
 
           <p className="text-xs leading-relaxed text-muted">
             Очки — сумма всех очков, набранных игроком во всех его матчах. При равенстве выше тот,
-            у кого лучше разница очков, затем — больше побед.
+            у кого лучше разница очков, затем — больше побед. Число рядом с именем — насколько
+            турнир сдвинул клубный рейтинг игрока.
             {tournament.format === 'mexicano' && !isFinished &&
               ' По этому же порядку собирается следующий раунд: первая четвёрка играет на первом' +
                 ' корте, первый с четвёртым против второго с третьим.'}

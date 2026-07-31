@@ -18,7 +18,8 @@ import {
 } from './mexicano';
 import { normalizeKey } from './normalize';
 import { prisma } from './prisma';
-import { upsertPeople } from './roster';
+import { START_RATING, type Rating } from './rating';
+import { ratingsForOwner, upsertPeople } from './roster';
 import { computeStandings } from './standings';
 import type {
   Match,
@@ -258,7 +259,7 @@ export async function listTournaments(ownerId: string): Promise<TournamentSummar
 /** Игроки и матчи в той форме, в которой их ждут клиент и computeStandings. */
 const BOARD_SELECT = {
   players: {
-    select: { id: true, seat: true, person: { select: { name: true } } },
+    select: { id: true, seat: true, personId: true, person: { select: { name: true } } },
     orderBy: { seat: 'asc' },
   },
   matches: {
@@ -324,6 +325,15 @@ export async function loadTournament(id: string, ownerId: string): Promise<Tourn
 
   if (!t) throw new ApiError('Турнир не найден', 404);
 
+  // Рейтинг участников на момент, когда они сюда пришли: всё, что сыграно
+  // раньше этого турнира. Ключ меняется с человека на его место в турнире —
+  // матчи и таблица знают игроков только так.
+  const ratings = await ratingsForOwner(ownerId, { id: t.id, createdAt: t.createdAt });
+  const ratingBefore: Record<string, Rating> = {};
+  for (const p of t.players) {
+    ratingBefore[p.id] = ratings.get(p.personId) ?? { rating: START_RATING, matches: 0 };
+  }
+
   return {
     id: t.id,
     name: t.name,
@@ -334,6 +344,7 @@ export async function loadTournament(id: string, ownerId: string): Promise<Tourn
     createdAt: t.createdAt.toISOString(),
     ...lifecycle(t.completedAt, t.closedAt),
     ...readBoard(t),
+    ratingBefore,
   };
 }
 
