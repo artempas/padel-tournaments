@@ -27,6 +27,20 @@ test('после последнего раунда впереди пусто', (
   assert.deepEqual(upcomingRounds('mexicano', 8, 2, 4, 5), []);
 });
 
+test('продлённое американо длиннее, чем «каждый с каждым»', () => {
+  // 8 игроков — 14 матчей; после двух добавленных раундов их 18, и прогресс
+  // должен считаться от восемнадцати, а не показывать 18/14.
+  assert.equal(tournamentSize('americano', 8, 2, null).matches, 14);
+  assert.equal(tournamentSize('americano', 8, 2, null, 18).matches, 18);
+  assert.equal(tournamentSize('americano', 8, 2, null, 18).rounds, 9);
+});
+
+test('созданное короче запланированного длину турнира не укорачивает', () => {
+  // У мексикано матчей в базе всегда меньше итога — граница снизу молчит.
+  assert.equal(tournamentSize('mexicano', 8, 2, 6, 4).matches, 12);
+  assert.equal(tournamentSize('americano', 8, 2, null, 4).matches, 14);
+});
+
 test('видимое расписание сходится с длиной турнира', () => {
   for (const players of [4, 8, 9, 13, 16]) {
     for (const courts of [1, 2, 3]) {

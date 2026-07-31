@@ -191,6 +191,52 @@ function improveRound(s: State, quads: Quad[]): void {
   }
 }
 
+/**
+ * Build one more round on top of everything `s` already knows and fold it in.
+ *
+ * The state is the only memory the generator has, so a round built here is the
+ * best next round given the history — whether that history came from this same
+ * run or was replayed from matches already played (see `extendAmericano`).
+ */
+function appendRound(
+  s: State,
+  round: number,
+  courtCount: number,
+  rng: () => number,
+  restarts: number,
+): ScheduledMatch[] {
+  const pool = pickPool(s, courtCount * 4, rng);
+
+  let bestQuads: Quad[] | null = null;
+  let bestCost = Infinity;
+  for (let r = 0; r < restarts; r++) {
+    const quads = buildRoundGreedy(s, pool, rng);
+    improveRound(s, quads);
+    const cost = roundCost(s, quads);
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestQuads = quads;
+    }
+    if (cost === 0) break;
+  }
+
+  const quads = bestQuads!;
+  const playing = new Set<number>();
+  const matches = quads.map((q, i): ScheduledMatch => {
+    commit(s, q);
+    q.forEach((p) => playing.add(p));
+    return {
+      round,
+      court: i + 1,
+      team1: [q[0], q[1]],
+      team2: [q[2], q[3]],
+    };
+  });
+
+  for (let i = 0; i < s.n; i++) s.rest[i] = playing.has(i) ? 0 : s.rest[i] + 1;
+  return matches;
+}
+
 function buildSchedule(
   n: number,
   matchesPerRound: number,
@@ -204,36 +250,10 @@ function buildSchedule(
 
   while (matches.length < totalMatches) {
     round++;
+    // Последний раунд может оказаться неполным: «каждый с каждым» кончается
+    // не обязательно на границе раунда.
     const m = Math.min(matchesPerRound, totalMatches - matches.length);
-    const pool = pickPool(s, m * 4, rng);
-
-    let bestQuads: Quad[] | null = null;
-    let bestCost = Infinity;
-    for (let r = 0; r < restarts; r++) {
-      const quads = buildRoundGreedy(s, pool, rng);
-      improveRound(s, quads);
-      const cost = roundCost(s, quads);
-      if (cost < bestCost) {
-        bestCost = cost;
-        bestQuads = quads;
-      }
-      if (cost === 0) break;
-    }
-
-    const quads = bestQuads!;
-    const playing = new Set<number>();
-    quads.forEach((q, i) => {
-      commit(s, q);
-      q.forEach((p) => playing.add(p));
-      matches.push({
-        round,
-        court: i + 1,
-        team1: [q[0], q[1]],
-        team2: [q[2], q[3]],
-      });
-    });
-
-    for (let i = 0; i < n; i++) s.rest[i] = playing.has(i) ? 0 : s.rest[i] + 1;
+    matches.push(...appendRound(s, round, m, rng, restarts));
   }
 
   return { matches, state: s };
@@ -467,4 +487,86 @@ export function generateAmericano(
     matchesPerRound,
     quality,
   };
+}
+
+/** Матч, который уже стоит в расписании: индексы игроков и раунд. */
+export interface PlayedMatch {
+  round: number;
+  team1: [number, number];
+  team2: [number, number];
+}
+
+/** Восстановить счётчики пар, соперников и отдыха по уже составленным матчам. */
+function replayHistory(n: number, history: PlayedMatch[]): State {
+  const s = createState(n);
+
+  const byRound = new Map<number, Quad[]>();
+  for (const m of history) {
+    const quad: Quad = [m.team1[0], m.team1[1], m.team2[0], m.team2[1]];
+    for (const p of quad) {
+      if (!Number.isInteger(p) || p < 0 || p >= n) {
+        throw new Error('В расписании есть игрок вне состава турнира');
+      }
+    }
+    if (!byRound.has(m.round)) byRound.set(m.round, []);
+    byRound.get(m.round)!.push(quad);
+  }
+
+  // Раунды строго по порядку: `rest` считает подряд идущие пропуски, и
+  // перемешанная история дала бы другой ответ.
+  for (const round of [...byRound.keys()].sort((a, b) => a - b)) {
+    const playing = new Set<number>();
+    for (const quad of byRound.get(round)!) {
+      commit(s, quad);
+      quad.forEach((p) => playing.add(p));
+    }
+    for (let i = 0; i < n; i++) s.rest[i] = playing.has(i) ? 0 : s.rest[i] + 1;
+  }
+
+  return s;
+}
+
+/**
+ * Дописать раунды к уже начатому американо.
+ *
+ * «Каждый с каждым» к этому моменту, как правило, уже выполнено, и повторов
+ * пар не избежать — поэтому цели «ноль повторов» здесь нет. Есть та же цена,
+ * что и при составлении: повторить пару дорого, повторить соперника дёшево,
+ * играть должны все поровну. Генератор просто продолжает считать с того места,
+ * где остановилось расписание, и добавочные раунды выходят настолько
+ * непохожими на сыгранные, насколько это возможно.
+ *
+ * Уже сыгранное не трогается: `globalRepair` здесь не зовут — переставлять
+ * людей в матчах со счётом нельзя.
+ *
+ * Раунды в ответе нумеруются с 1 — смещение до места в турнире делает вызывающий.
+ */
+export function extendAmericano(
+  playerCount: number,
+  courts: number,
+  extraRounds: number,
+  history: PlayedMatch[],
+  opts: { seed?: number } = {},
+): ScheduledMatch[] {
+  const n = playerCount;
+  if (!Number.isInteger(n) || n < MIN_PLAYERS || n > MAX_PLAYERS) {
+    throw new Error(`Число игроков должно быть от ${MIN_PLAYERS} до ${MAX_PLAYERS}`);
+  }
+  if (!Number.isInteger(courts) || courts < 1 || courts > MAX_COURTS) {
+    throw new Error(`Число кортов должно быть от 1 до ${MAX_COURTS}`);
+  }
+  if (!Number.isInteger(extraRounds) || extraRounds < 1) {
+    throw new Error('Добавить можно хотя бы один раунд');
+  }
+
+  const s = replayHistory(n, history);
+  const courtCount = Math.min(courts, Math.floor(n / 4));
+  const restarts = n <= 12 ? 6 : 4;
+  const rng = mulberry32(opts.seed ?? ((Math.random() * 2 ** 32) >>> 0));
+
+  const matches: ScheduledMatch[] = [];
+  for (let round = 1; round <= extraRounds; round++) {
+    matches.push(...appendRound(s, round, courtCount, rng, restarts));
+  }
+  return matches;
 }
