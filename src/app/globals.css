@@ -11,6 +11,7 @@
   --color-accent-ink: #16230a;
   --color-court: #2f7de1;
   --color-warn: #ffb340;
+  --color-danger: #ff6b5c;
 
   --radius-card: 1rem;
 }
@@ -27,6 +28,7 @@
     --color-accent-ink: #f8fbec;
     --color-court: #2563eb;
     --color-warn: #b45309;
+    --color-danger: #c02718;
   }
 
   html {
