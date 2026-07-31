@@ -17,6 +17,21 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV BUILD_STANDALONE=1
 RUN npm run build
 
+# ---- prisma CLI -------------------------------------------------------------
+# Мигратору нужен CLI целиком. Вырезать node_modules/prisma и node_modules/@prisma
+# из общего дерева нельзя: @prisma/config требует effect, c12, jiti и ещё сотню
+# пакетов, которые npm поднял в корень node_modules, — без них CLI падает с
+# `Cannot find module 'effect'`. Поэтому ставим CLI в отдельную папку, где npm
+# сам разложит всё замыкание зависимостей. Версия берётся из lock-файла, чтобы
+# CLI не разъезжался с @prisma/client.
+FROM node:22-alpine AS migrator
+WORKDIR /migrator
+COPY package-lock.json ./app-lock.json
+RUN npm init -y > /dev/null \
+ && npm install --no-audit --no-fund \
+      "prisma@$(node -p "require('./app-lock.json').packages['node_modules/prisma'].version")" \
+ && rm app-lock.json
+
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -38,8 +53,9 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 # Migrations run from the same image, so they ship with it. `prisma migrate
 # deploy` нужен CLI, схема, миграции и конфиг — standalone-бандл их не тащит.
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
+# CLI приезжает целиком отдельной стадией и ложится поверх node_modules из
+# standalone: пересечений там нет, кроме @prisma/*, а они той же версии.
+COPY --from=migrator --chown=nextjs:nodejs /migrator/node_modules ./node_modules
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
 

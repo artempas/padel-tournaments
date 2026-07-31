@@ -13,14 +13,16 @@ fi
 # и не надо ходить на NAS руками. Set SKIP_MIGRATE=1 to opt out.
 if [ "$SKIP_MIGRATE" != "1" ]; then
   # After a NAS reboot Postgres may still be coming up, so retry rather than
-  # dropping into a restart loop.
+  # dropping into a restart loop. Сообщение намеренно не утверждает, что дело в
+  # базе: падать здесь может и сам CLI, а «database not ready» в таком случае
+  # уводит в сторону — настоящая причина всегда выше в логе.
   attempt=1
   until node $MIGRATE; do
     if [ "$attempt" -ge 10 ]; then
-      echo "Database still unreachable after $attempt attempts — giving up."
+      echo "Migration still failing after $attempt attempts — giving up (see the error above)."
       exit 1
     fi
-    echo "Database not ready (attempt $attempt), retrying in 5s..."
+    echo "Migration attempt $attempt failed, retrying in 5s..."
     attempt=$((attempt + 1))
     sleep 5
   done
