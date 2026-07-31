@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateAmericano, totalMatchesFor } from '../src/lib/americano.ts';
+import {
+  extendAmericano,
+  generateAmericano,
+  totalMatchesFor,
+  type PlayedMatch,
+} from '../src/lib/americano.ts';
 
 /** Every invariant the tournament screen relies on. */
 function checkInvariants(n: number, courts: number, schedule: ReturnType<typeof generateAmericano>) {
@@ -108,4 +113,129 @@ test('rejects fields that cannot form a match', () => {
   assert.throws(() => generateAmericano(3, 1));
   assert.throws(() => generateAmericano(33, 1));
   assert.throws(() => generateAmericano(8, 0));
+});
+
+// ---------------------------------------------------------------------------
+// Продление: раунды, дописанные к уже сыгранному расписанию.
+// ---------------------------------------------------------------------------
+
+/** Расписание в том виде, в каком его помнит турнир: раунд плюс две пары. */
+function asHistory(matches: PlayedMatch[]): PlayedMatch[] {
+  return matches.map((m) => ({ round: m.round, team1: m.team1, team2: m.team2 }));
+}
+
+function gamesPlayed(n: number, matches: PlayedMatch[]): number[] {
+  const games = Array.from({ length: n }, () => 0);
+  for (const m of matches) for (const p of [...m.team1, ...m.team2]) games[p]++;
+  return games;
+}
+
+function partnerCounts(n: number, matches: PlayedMatch[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const m of matches) {
+    for (const pair of [m.team1, m.team2]) {
+      const key = [...pair].sort((a, b) => a - b).join('-');
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+test('добавленные раунды — полноценные раунды турнира', () => {
+  for (const [n, courts] of [
+    [8, 2],
+    [9, 2],
+    [12, 3],
+    [16, 4],
+  ] as Array<[number, number]>) {
+    const base = generateAmericano(n, courts, { seed: 4242 });
+    const added = extendAmericano(n, courts, 3, asHistory(base.matches), { seed: 99 });
+    const label = `n=${n}, courts=${courts}`;
+
+    assert.equal(added.length, 3 * base.matchesPerRound, `${label}: длина добавки`);
+    assert.deepEqual(
+      [...new Set(added.map((m) => m.round))].sort((a, b) => a - b),
+      [1, 2, 3],
+      `${label}: нумерация с единицы`,
+    );
+
+    for (const round of [1, 2, 3]) {
+      const inRound = added.filter((m) => m.round === round);
+      const seats = inRound.flatMap((m) => [...m.team1, ...m.team2]);
+      assert.equal(new Set(seats).size, seats.length, `${label}: раунд ${round} без совместителей`);
+      assert.equal(
+        new Set(inRound.map((m) => m.court)).size,
+        inRound.length,
+        `${label}: раунд ${round} без двух матчей на корте`,
+      );
+      for (const p of seats) assert.ok(p >= 0 && p < n, `${label}: игрок из состава`);
+    }
+  }
+});
+
+test('продление не сбивает счёт сыгранных матчей', () => {
+  for (const [n, courts] of [
+    [8, 2],
+    [10, 2],
+    [13, 3],
+  ] as Array<[number, number]>) {
+    const base = generateAmericano(n, courts, { seed: 4242 });
+    const history = asHistory(base.matches);
+    const added = extendAmericano(n, courts, 4, history, { seed: 7 });
+
+    const games = gamesPlayed(n, [...history, ...added]);
+    assert.ok(
+      Math.max(...games) - Math.min(...games) <= 1,
+      `n=${n}: разброс игр ${Math.min(...games)}..${Math.max(...games)}`,
+    );
+  }
+});
+
+test('добавленные пары повторяют сыгранные как можно реже', () => {
+  // Идеальное американо на 8 игроков уже свело каждого с каждым по разу,
+  // поэтому новые пары — обязательно повторы. Важно, чтобы повторялись все
+  // понемногу, а не одни и те же по три раза.
+  const n = 8;
+  const base = generateAmericano(n, 2, { seed: 4242 });
+  const history = asHistory(base.matches);
+  assert.equal(base.quality.repeatedPartnerships, 0);
+
+  const added = extendAmericano(n, 2, 3, history, { seed: 11 });
+  const counts = partnerCounts(n, [...history, ...added]);
+
+  for (const [pair, count] of counts) {
+    assert.ok(count <= 2, `пара ${pair} сыграла вместе ${count} раза`);
+  }
+});
+
+test('на корт первыми выходят те, кто меньше играл', () => {
+  // Восьмой игрок опоздал и пропустил оба раунда — добавочный раунд обязан
+  // взять его: у него меньше всех игр.
+  const history: PlayedMatch[] = [
+    { round: 1, team1: [1, 2], team2: [3, 4] },
+    { round: 2, team1: [5, 6], team2: [7, 1] },
+  ];
+
+  const added = extendAmericano(8, 1, 1, history, { seed: 5 });
+  assert.equal(added.length, 1);
+  assert.ok([...added[0].team1, ...added[0].team2].includes(0));
+});
+
+test('одно и то же зерно продлевает одинаково', () => {
+  const base = generateAmericano(8, 2, { seed: 42 });
+  const history = asHistory(base.matches);
+  assert.deepEqual(
+    extendAmericano(8, 2, 2, history, { seed: 3 }),
+    extendAmericano(8, 2, 2, history, { seed: 3 }),
+  );
+});
+
+test('продление отвергает бессмыслицу', () => {
+  const history = asHistory(generateAmericano(8, 2, { seed: 1 }).matches);
+  assert.throws(() => extendAmericano(8, 2, 0, history));
+  assert.throws(() => extendAmericano(8, 2, 1.5, history));
+  assert.throws(() => extendAmericano(3, 1, 1, []));
+  assert.throws(() => extendAmericano(8, 0, 1, history));
+  // Игрок, которого нет в составе, — расписание не от этого турнира.
+  assert.throws(() => extendAmericano(8, 2, 1, [{ round: 1, team1: [0, 1], team2: [2, 9] }]));
 });

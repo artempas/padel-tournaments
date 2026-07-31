@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import ScoreSheet from './ScoreSheet';
 import ThemeToggle from './ThemeToggle';
 import { formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
+import { MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
 import { useOptimisticState } from '@/lib/optimistic';
 import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending-scores';
@@ -46,6 +47,8 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFinish, setConfirmFinish] = useState(false);
+  const [extending, setExtending] = useState(false);
+  const [extraRounds, setExtraRounds] = useState(2);
 
   const tournament = useMemo(() => applyPendingScores(server, pending), [server, pending]);
   const pendingIds = useMemo(() => new Set(pending.map((p) => p.matchId)), [pending]);
@@ -120,12 +123,14 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
 
   const playedCount = tournament.matches.filter((m) => m.score1 !== null).length;
   // У мексикано матчи создаются раунд за раундом, поэтому длину турнира
-  // приходится считать, а не брать из уже созданного.
+  // приходится считать, а не брать из уже созданного — но и не меньше него:
+  // продлённое американо длиннее, чем «каждый с каждым».
   const total = tournamentSize(
     tournament.format,
     tournament.players.length,
     tournament.courts,
     tournament.roundsPlanned,
+    tournament.matches.length,
   ).matches;
   const remaining = total - playedCount;
   const isFinished = tournament.status === 'finished';
@@ -157,6 +162,13 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
       rounds,
     ],
   );
+
+  // Сколько раундов ещё можно добавить. У мексикано длина турнира записана
+  // числом и упирается в общий потолок; у американо её задаёт состав, и
+  // ограничен только размер одной добавки.
+  const maxExtra =
+    tournament.roundsPlanned === null ? MAX_ROUNDS : MAX_ROUNDS - tournament.roundsPlanned;
+  const extra = Math.min(extraRounds, maxExtra);
 
   const editing = editingId ? (tournament.matches.find((m) => m.id === editingId) ?? null) : null;
 
@@ -225,6 +237,49 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
       },
       message: 'Не удалось изменить статус турнира',
       offline: 'Нет сети — статус турнира можно изменить только со связью',
+    });
+  }
+
+  /**
+   * Продлить турнир. Матчи добавочных раундов рождаются на сервере — у
+   * мексикано их вообще не из чего собрать заранее, — поэтому сразу видно
+   * только то, что турнир снова идёт. У мексикано к этому добавляется новая
+   * длина, и пустые карточки будущих раундов появляются, не дожидаясь ответа.
+   *
+   * Досрочно завершённый турнир от добавленных раундов сам собой не
+   * возобновляется: вернуть его в игру — отдельное решение организатора,
+   * кнопка «Продолжить турнир» никуда не делась.
+   */
+  function addRounds(count: number) {
+    const before = server;
+
+    setExtending(false);
+    setTab('matches');
+
+    mutate({
+      next: (t) => ({
+        ...t,
+        roundsPlanned: t.roundsPlanned === null ? null : t.roundsPlanned + count,
+        // Доигранным турнир быть перестал — матчей стало больше, чем сыграно.
+        status: t.closedEarly ? 'finished' : 'running',
+        finishedAt: t.closedEarly ? t.finishedAt : null,
+      }),
+      undo: (t) => ({
+        ...t,
+        roundsPlanned: before.roundsPlanned,
+        status: before.status,
+        finishedAt: before.finishedAt,
+      }),
+      send: async () => {
+        const data = await request<{ tournament: TournamentDetail }>(
+          `/api/tournaments/${before.id}/rounds`,
+          { method: 'POST', body: JSON.stringify({ rounds: count }) },
+        );
+        router.refresh();
+        return data.tournament;
+      },
+      message: 'Не удалось продлить турнир',
+      offline: 'Нет сети — раунды добавляются на сервере, нужна связь',
     });
   }
 
@@ -301,15 +356,29 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
           ) : (
             <p className="mt-0.5 text-sm text-muted">Ни одного матча не сыграно.</p>
           )}
-          {tournament.closedEarly && remaining > 0 && (
-            <button
-              type="button"
-              onClick={() => setClosed(false)}
-              className="tap mt-3 w-full rounded-xl border border-accent/50 px-4 text-sm font-semibold text-accent"
-            >
-              Продолжить турнир
-            </button>
-          )}
+          <div className="mt-3 flex flex-col gap-2">
+            {tournament.closedEarly && remaining > 0 && (
+              <button
+                type="button"
+                onClick={() => setClosed(false)}
+                className="tap w-full rounded-xl border border-accent/50 px-4 text-sm font-semibold text-accent"
+              >
+                Продолжить турнир
+              </button>
+            )}
+            {extra >= MIN_ROUNDS && (
+              <button
+                type="button"
+                onClick={() => {
+                  setExtending(true);
+                  setTab('matches');
+                }}
+                className="tap w-full rounded-xl border border-accent/50 px-4 text-sm font-semibold text-accent"
+              >
+                Продлить турнир
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -495,6 +564,68 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
               )}
             </section>
           ))}
+
+          {extra >= MIN_ROUNDS && (
+            <div className="pt-1">
+              {extending ? (
+                <div className="card p-4">
+                  <p className="mb-1 text-sm font-semibold">Сколько раундов добавить?</p>
+                  <p className="mb-3 text-sm text-muted">
+                    {tournament.format === 'mexicano'
+                      ? 'Составы соберутся по таблице — каждый следующий раунд, когда доигран предыдущий.'
+                      : 'Пары подберутся заново — так, чтобы поменьше повторять уже сыгранные.'}
+                  </p>
+
+                  <div className="mb-4 flex items-center gap-4">
+                    <button
+                      type="button"
+                      onClick={() => setExtraRounds(Math.max(MIN_ROUNDS, extra - 1))}
+                      disabled={extra <= MIN_ROUNDS}
+                      className="tap w-14 rounded-xl border border-line text-xl font-bold disabled:opacity-30"
+                    >
+                      −
+                    </button>
+                    <span className="flex-1 text-center text-3xl font-bold tabular-nums">
+                      {extra}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setExtraRounds(Math.min(maxExtra, extra + 1))}
+                      disabled={extra >= maxExtra}
+                      className="tap w-14 rounded-xl border border-line text-xl font-bold disabled:opacity-30"
+                    >
+                      +
+                    </button>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => addRounds(extra)}
+                      className="tap flex-1 rounded-xl bg-accent px-4 font-bold text-accent-ink"
+                    >
+                      Добавить
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExtending(false)}
+                      className="tap flex-1 rounded-xl border border-line px-4 font-medium text-muted"
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setExtending(true)}
+                  className="tap w-full rounded-xl border border-line px-4 text-sm font-medium text-muted"
+                >
+                  Продлить турнир
+                </button>
+              )}
+            </div>
+          )}
 
           {!isFinished && remaining > 0 && (
             <div className="pt-1">

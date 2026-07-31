@@ -62,8 +62,15 @@ export default async function TournamentsPage() {
         <ul className="flex flex-col gap-3">
           {tournaments.map((t) => {
             // Не matchCount: у мексикано матчи появляются по ходу турнира, и
-            // счётчик созданных всё время равнялся бы сыгранным.
-            const total = tournamentSize(t.format, t.playerCount, t.courts, t.roundsPlanned).matches;
+            // счётчик созданных всё время равнялся бы сыгранным. Но и не меньше
+            // него — продлённое американо длиннее, чем «каждый с каждым».
+            const total = tournamentSize(
+              t.format,
+              t.playerCount,
+              t.courts,
+              t.roundsPlanned,
+              t.matchCount,
+            ).matches;
             const progress = total ? Math.round((t.playedCount / total) * 100) : 0;
             return (
               <li key={t.id}>

@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, parseUuid } from './api';
-import { generateAmericano, MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS } from './americano';
+import {
+  extendAmericano,
+  generateAmericano,
+  MAX_COURTS,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
+  type PlayedMatch,
+} from './americano';
 import {
   DEFAULT_ROUNDS,
   firstRound,
@@ -454,6 +461,100 @@ async function refreshCompletion(tx: Prisma.TransactionClient, tournamentId: str
       data: { completedAt: null },
     });
   }
+}
+
+/**
+ * Продлить турнир: доиграли запланированное, а расходиться рано.
+ *
+ * Форматы продлеваются по-разному, потому что по-разному знают свою длину.
+ * У мексикано она записана числом — его и увеличиваем, а раунд за раундом
+ * достроит `extendMexicano`, как и в обычном ходе турнира. У американо длину
+ * задаёт «каждый с каждым», менять там нечего: добавочные раунды дописываются
+ * сразу, продолжая расписание с учётом всех уже сыгранных пар.
+ *
+ * `closedAt` не трогается. Длина турнира и решение доигрывать его или нет —
+ * разные вещи: продлить на пять раундов и сыграть три из них законно, и
+ * заканчивается это обычным досрочным завершением. Ставит и снимает метку
+ * только `setTournamentClosed`, по явному действию организатора.
+ *
+ * `completedAt` — наоборот, снимет `refreshCompletion`: новые матчи ещё без
+ * счёта, значит турнир больше не доигран.
+ */
+export async function extendTournament(
+  tournamentId: string,
+  ownerId: string,
+  extraRounds: number,
+): Promise<TournamentDetail> {
+  const tid = parseUuid(tournamentId, 'Турнир не найден');
+
+  if (!Number.isInteger(extraRounds) || extraRounds < MIN_ROUNDS || extraRounds > MAX_ROUNDS) {
+    throw new ApiError(`Добавить можно от ${MIN_ROUNDS} до ${MAX_ROUNDS} раундов`);
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const t = await tx.tournament.findFirst({
+      where: { id: tid, ownerId },
+      select: {
+        format: true,
+        courts: true,
+        pointsPerMatch: true,
+        roundsPlanned: true,
+        ...BOARD_SELECT,
+      },
+    });
+    if (!t) throw new ApiError('Турнир не найден', 404);
+
+    if (t.format === 'mexicano') {
+      // Верхнюю границу держит и CHECK tournaments_rounds_planned_range —
+      // здесь она лишь затем, чтобы вместо 500 вернуть внятный текст.
+      const planned = (t.roundsPlanned ?? 0) + extraRounds;
+      if (planned > MAX_ROUNDS) {
+        throw new ApiError(
+          `В турнире не может быть больше ${MAX_ROUNDS} раундов — сейчас запланировано ${t.roundsPlanned}`,
+        );
+      }
+      await tx.tournament.update({ where: { id: tid }, data: { roundsPlanned: planned } });
+    } else if (t.format === 'americano') {
+      const { players, matches } = readBoard(t);
+      // Генератор считает игроков номерами; players отсортированы по seat,
+      // поэтому место в списке — это и есть индекс, которым он их знает.
+      const indexOf = new Map(players.map((p, index) => [p.id, index]));
+      const asIndices = (ids: [string, string]): [number, number] => [
+        indexOf.get(ids[0])!,
+        indexOf.get(ids[1])!,
+      ];
+
+      const history: PlayedMatch[] = matches.map((m) => ({
+        round: m.round,
+        team1: asIndices(m.team1),
+        team2: asIndices(m.team2),
+      }));
+      const lastRound = matches.reduce((max, m) => Math.max(max, m.round), 0);
+
+      const added = extendAmericano(players.length, t.courts, extraRounds, history);
+      await insertMatches(
+        tx,
+        tid,
+        t.pointsPerMatch,
+        added.map((m) => ({
+          round: lastRound + m.round,
+          court: m.court,
+          team1: m.team1,
+          team2: m.team2,
+        })),
+        (index) => players[index].id,
+      );
+    } else {
+      throw new ApiError('Этот формат турнира продлить нельзя');
+    }
+
+    // Тот же порядок, что и при внесении счёта: сначала достроить, потом
+    // пересчитать завершённость — иначе турнир на секунду выглядел бы доигранным.
+    await extendMexicano(tx, tid);
+    await refreshCompletion(tx, tid);
+  });
+
+  return loadTournament(tid, ownerId);
 }
 
 /**

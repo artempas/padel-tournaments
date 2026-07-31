@@ -32,20 +32,26 @@ export function formatLabel(format: TournamentFormat): string {
  * задаёт организатор. Считается одинаково и до старта (предпросмотр в форме),
  * и после (прогресс в списке): у мексикано матчи создаются по ходу дела, и
  * `matches.length` до конца турнира меньше настоящего итога.
+ *
+ * `builtMatches` — сколько матчей уже стоит в расписании. Это нижняя граница
+ * итога: продлённое американо длиннее, чем «каждый с каждым», и без неё
+ * прогресс дорос бы до 17/14. У мексикано граница ни на что не влияет —
+ * созданного там всегда не больше запланированного.
  */
 export function tournamentSize(
   format: TournamentFormat,
   playerCount: number,
   courts: number,
   roundsPlanned: number | null,
+  builtMatches = 0,
 ): { matches: number; rounds: number } {
   const perRound = Math.max(1, matchesPerRound(playerCount, courts));
 
   if (format === 'mexicano' && roundsPlanned !== null) {
-    return { matches: perRound * roundsPlanned, rounds: roundsPlanned };
+    return { matches: Math.max(perRound * roundsPlanned, builtMatches), rounds: roundsPlanned };
   }
 
-  const matches = totalMatchesFor(playerCount);
+  const matches = Math.max(totalMatchesFor(playerCount), builtMatches);
   return { matches, rounds: Math.ceil(matches / perRound) };
 }
 
