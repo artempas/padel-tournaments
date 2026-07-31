@@ -3,10 +3,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import DynamicsChart from './DynamicsChart';
+import InsightCards from './InsightCards';
 import ScoreSheet from './ScoreSheet';
 import ShareResultsSheet from './ShareResultsSheet';
 import ThemeToggle from './ThemeToggle';
 import { formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
+import {
+  balanceContext,
+  balanceSummary,
+  dynamicsInsights,
+  matchBalance,
+  roundHistory,
+  tournamentInsights,
+  type MatchBalance,
+} from '@/lib/insights';
 import { MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
 import { useOptimisticState } from '@/lib/optimistic';
@@ -17,7 +28,7 @@ import type { ResultsCardData } from '@/lib/results-card';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
-type Tab = 'matches' | 'table';
+type Tab = 'matches' | 'table' | 'dynamics';
 
 /**
  * Удаление уводит с экрана раньше ответа сервера, поэтому об отказе некому
@@ -29,6 +40,17 @@ let failedDelete: { tournamentId: string; message: string } | null = null;
 function teamName(ids: [string, string], playersById: Map<string, Player>): string {
   return ids.map((id) => playersById.get(id)?.name ?? '—').join(' / ');
 }
+
+/**
+ * Цвет чипа по силе перекоса: зелёный — команды равны, жёлтый — перекос
+ * заметен, красный — матч был неравным. Индекс — это `MatchBalance.level`.
+ */
+const BALANCE_TONE = [
+  'bg-accent/10 text-accent',
+  'bg-warn/15 text-warn',
+  'bg-danger/15 text-danger',
+  'bg-danger/15 text-danger',
+];
 
 export default function TournamentView({ initial }: { initial: TournamentDetail }) {
   const router = useRouter();
@@ -124,6 +146,19 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
     [tournament.players, tournament.matches],
   );
 
+  // Насколько равны были команды в каждом сыгранном матче. Считается разом на
+  // весь турнир: сила игрока — это все его остальные матчи, и меняется она с
+  // каждым внесённым счётом.
+  const balances = useMemo(() => {
+    const context = balanceContext(tournament.matches);
+    const map = new Map<string, MatchBalance>();
+    for (const match of tournament.matches) {
+      const balance = matchBalance(context, match);
+      if (balance) map.set(match.id, balance);
+    }
+    return map;
+  }, [tournament.matches]);
+
   const playedCount = tournament.matches.filter((m) => m.score1 !== null).length;
   // У мексикано матчи создаются раунд за раундом, поэтому длину турнира
   // приходится считать, а не брать из уже созданного — но и не меньше него:
@@ -142,6 +177,27 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
   const finishedEarly = isFinished && remaining > 0;
   const currentRound =
     rounds.find(([, matches]) => matches.some((m) => m.score1 === null))?.[0] ?? null;
+
+  // Итоги подводятся у завершённого турнира: на середине факты меняются каждый
+  // раунд, а «камбэк» и «лидер до конца» ещё ничего не значат.
+  const insights = useMemo(
+    () => (isFinished ? tournamentInsights(tournament.players, tournament.matches) : []),
+    [isFinished, tournament.players, tournament.matches],
+  );
+  const history = useMemo(
+    () => (isFinished ? roundHistory(tournament.players, tournament.matches) : []),
+    [isFinished, tournament.players, tournament.matches],
+  );
+  const dynamics = useMemo(
+    () => (isFinished ? dynamicsInsights(tournament.players, tournament.matches) : []),
+    [isFinished, tournament.players, tournament.matches],
+  );
+
+  // Один срез — это не динамика, а та же итоговая таблица сбоку.
+  const hasDynamics = history.length >= 2;
+  // Вкладка может исчезнуть под ногами: турнир вернули в игру кнопкой
+  // «Продолжить». Тогда показываем таблицу, не дожидаясь клика.
+  const activeTab: Tab = tab === 'dynamics' && !hasDynamics ? 'table' : tab;
 
   // Раунды, которые уже стоят в расписании, но составов у них ещё нет.
   // Завершённому турниру их показывать не за чем — играть больше нечего.
@@ -409,11 +465,16 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
         </div>
       )}
 
-      <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl bg-surface p-1">
+      <div
+        className={`mb-5 grid gap-1 rounded-xl bg-surface p-1 ${
+          hasDynamics ? 'grid-cols-3' : 'grid-cols-2'
+        }`}
+      >
         {(
           [
             ['matches', 'Матчи'],
             ['table', 'Таблица'],
+            ...(hasDynamics ? [['dynamics', 'Динамика']] : []),
           ] as Array<[Tab, string]>
         ).map(([value, label]) => (
           <button
@@ -421,7 +482,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             type="button"
             onClick={() => setTab(value)}
             className={`tap rounded-lg px-3 text-sm font-semibold transition ${
-              tab === value ? 'bg-surface-2 text-text' : 'text-muted'
+              activeTab === value ? 'bg-surface-2 text-text' : 'text-muted'
             }`}
           >
             {label}
@@ -460,7 +521,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
         </p>
       )}
 
-      {tab === 'matches' ? (
+      {activeTab === 'matches' ? (
         <div className="flex flex-col gap-6">
           {rounds.map(([round, matches]) => {
             const resting = restingInRound(tournament.players, tournament.matches, round);
@@ -485,10 +546,18 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                     const team1Won = played && match.score1! > match.score2!;
                     const team2Won = played && match.score2! > match.score1!;
                     const unsent = pendingIds.has(match.id);
+                    const balance = balances.get(match.id) ?? null;
 
                     const summary =
                       (played ? `счёт ${match.score1}:${match.score2}` : 'счёт не внесён') +
-                      (unsent ? ', ещё не отправлен' : '');
+                      (unsent ? ', ещё не отправлен' : '') +
+                      (balance
+                        ? `. ${balanceSummary(
+                            balance,
+                            teamName(match.team1, playersById),
+                            teamName(match.team2, playersById),
+                          )}`
+                        : '');
 
                     return (
                       <li key={match.id}>
@@ -525,8 +594,22 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                             >
                               {teamName(match.team1, playersById)}
                             </span>
-                            <span className="shrink-0 text-center text-base font-bold tabular-nums">
-                              {played ? `${match.score1} : ${match.score2}` : '–  :  –'}
+                            <span className="flex shrink-0 flex-col items-center gap-0.5">
+                              <span className="text-base font-bold tabular-nums">
+                                {played ? `${match.score1} : ${match.score2}` : '–  :  –'}
+                              </span>
+                              {/* Острие смотрит на команду послабее; чем больше
+                                  символов, тем крупнее был перекос. */}
+                              {balance && (
+                                <span
+                                  aria-hidden="true"
+                                  className={`rounded px-1.5 py-px text-[11px] font-bold leading-4 ${
+                                    BALANCE_TONE[balance.level]
+                                  }`}
+                                >
+                                  {balance.symbols}
+                                </span>
+                              )}
                             </span>
                             <span
                               className={`min-w-0 flex-1 text-right text-sm leading-snug ${
@@ -591,6 +674,14 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
               )}
             </section>
           ))}
+
+          {balances.size > 0 && (
+            <p className="text-xs leading-relaxed text-muted">
+              Знак под счётом — насколько равны были команды. Считается по остальным матчам
+              игроков, поэтому от результата самой встречи не зависит: острие смотрит на команду
+              послабее, а чем больше символов, тем крупнее перекос. «=» — команды были равны.
+            </p>
+          )}
 
           {extra >= MIN_ROUNDS && (
             <div className="pt-1">
@@ -692,6 +783,19 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             </div>
           )}
         </div>
+      ) : activeTab === 'dynamics' ? (
+        <div className="flex flex-col gap-5">
+          <section className="card p-3">
+            <h2 className="mb-1 text-sm font-bold">Места по раундам</h2>
+            <p className="mb-3 text-xs leading-relaxed text-muted">
+              Линия на игрока, сверху — первое место. Призёры выделены цветом; нажмите на любого,
+              чтобы проследить его путь.
+            </p>
+            <DynamicsChart history={history} />
+          </section>
+
+          {dynamics.length > 0 && <InsightCards insights={dynamics} />}
+        </div>
       ) : (
         <div className="flex flex-col gap-5">
           <div className="card overflow-hidden">
@@ -731,6 +835,15 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
               ' По этому же порядку собирается следующий раунд: первая четвёрка играет на первом' +
                 ' корте, первый с четвёртым против второго с третьим.'}
           </p>
+
+          {insights.length > 0 && (
+            <section>
+              <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-muted">
+                Как это было
+              </h2>
+              <InsightCards insights={insights} />
+            </section>
+          )}
 
           {playedCount > 0 && (
             <button
