@@ -151,26 +151,6 @@ export default async function ClubProfilePage({
           <YandexAccount linked={linked} />
         </>
       )}
-
-      {/* Политика — тоже про аккаунт, а не про клуб, поэтому стоит в этом
-          разделе. Заголовок ей нужен свой, только если Яндекса нет: иначе она
-          окажется под чужим. */}
-      {!showYandex && (
-        <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-muted">Аккаунт</h2>
-      )}
-      <Link
-        href="/privacy"
-        className="card mt-3 flex items-center gap-3 p-4 transition active:scale-[0.99]"
-      >
-        <span className="text-2xl">🔒</span>
-        <span className="min-w-0 flex-1">
-          <span className="block font-semibold">Персональные данные</span>
-          <span className="block text-sm text-muted">
-            Что приложение хранит, зачем и как это удалить
-          </span>
-        </span>
-        <span className="shrink-0 text-muted">→</span>
-      </Link>
     </main>
   );
 }

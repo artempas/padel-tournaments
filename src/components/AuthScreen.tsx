@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   browserSupportsWebAuthn,
@@ -188,18 +187,6 @@ export default function AuthScreen({
         {yandex
           ? 'Вход по passkey — отпечаток, Face ID или PIN устройства — либо через Яндекс ID. Паролей нет.'
           : 'Вход только по passkey — отпечаток, Face ID или PIN устройства. Паролей нет.'}
-      </p>
-
-      {/* Согласие берётся здесь, а не отдельной галочкой: галочка, без которой
-          кнопка не нажимается, ничего не добавляет к осведомлённости — её
-          ставят не глядя. Ссылка же ведёт на открытую страницу, доступную до
-          входа, иначе соглашаться было бы не с чем. */}
-      <p className="text-center text-xs leading-relaxed text-muted">
-        {mode === 'register' ? 'Создавая аккаунт' : 'Продолжая'}, вы соглашаетесь с{' '}
-        <Link href="/privacy" className="font-semibold text-text underline">
-          политикой обработки персональных данных
-        </Link>
-        .
       </p>
     </main>
   );
