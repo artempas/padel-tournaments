@@ -129,6 +129,19 @@ try {
   const unlink = await api('/api/auth/yandex', { method: 'DELETE' });
   check('unlinking is a no-op when nothing is linked', () => assert.equal(unlink.status, 200));
 
+  // Регистрация заканчивается выбором имени, и кто именно регистрируется —
+  // знает сервер, а не запрос. Без начатой регистрации имя ничего не создаёт.
+  const orphan = await fetch(`${BASE}/api/auth/yandex/signup`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Никто' }),
+  });
+  check('a name alone registers nobody', () => assert.equal(orphan.status, 408));
+
+  const welcome = await fetch(`${BASE}/welcome`, { redirect: 'manual' });
+  check('the name screen has nothing to show without a pending signup', () =>
+    assert.equal(new URL(welcome.headers.get('location'), BASE).pathname, '/'));
+
   console.log('\ncreate');
   const players = ['Артём', 'Борис', 'Вера', 'Галина', 'Дмитрий', 'Елена', 'Женя', 'Зоя'];
   const created = await api('/api/tournaments', {

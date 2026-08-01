@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSession, getCurrentUser, pruneExpired } from '@/lib/auth';
-import { linkYandex, signInWithYandex, takeHandshake } from '@/lib/oauth';
+import { beginSignup, linkYandex, signInWithYandex, takeHandshake } from '@/lib/oauth';
 import { exchangeCode, fetchUserInfo, identityFrom, resolveOrigin, yandexConfig } from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
@@ -60,6 +60,15 @@ export async function GET(request: NextRequest) {
     }
 
     const userId = await signInWithYandex(identity);
+
+    // Незнакомый Яндекс — это не вход, а начало регистрации. Аккаунт заведётся,
+    // когда человек назовёт себя: логин в турнирной таблице ему ни к чему.
+    if (!userId) {
+      await beginSignup(identity, next);
+      await pruneExpired();
+      return NextResponse.redirect(new URL('/welcome', origin));
+    }
+
     await createSession(userId);
     await pruneExpired();
 

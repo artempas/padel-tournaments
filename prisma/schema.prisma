@@ -141,6 +141,35 @@ model OauthAccount {
   @@map("oauth_accounts")
 }
 
+// Начатая, но не завершённая регистрация: человек уже подтвердил себя у
+// провайдера, а имени, под которым он появится в приложении, ещё не выбрал.
+//
+// В базе, а не в куке, по той же причине, что и WebAuthn-challenge: здесь
+// лежит `id` пользователя у провайдера, то есть готовый пропуск в аккаунт.
+// Подписать куку нечем — своего секрета у приложения нет, — а строку в базе
+// клиент выбрать не может: в куку уходит только её непредсказуемый id.
+//
+// Аккаунта до конца этого разговора не существует: бросил на полпути — и не
+// осталось ничего, даже имени.
+model OauthSignup {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  provider          OauthProvider
+  providerAccountId String        @map("provider_account_id") @db.Text
+
+  login String? @db.Text
+  email String? @db.Text
+
+  // Куда человек шёл до того, как его отправили выбирать имя.
+  next String @db.Text
+
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([expiresAt])
+  @@map("oauth_signups")
+}
+
 model WebauthnChallenge {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 

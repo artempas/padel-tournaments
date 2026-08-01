@@ -68,5 +68,8 @@ export async function pruneExpired(): Promise<void> {
   await Promise.all([
     prisma.session.deleteMany({ where: { expiresAt: { lt: now } } }),
     prisma.webauthnChallenge.deleteMany({ where: { expiresAt: { lt: now } } }),
+    // Брошенные на полпути регистрации через провайдера — такой же мусор с
+    // истёкшим сроком, и убирается он тем же проходом.
+    prisma.oauthSignup.deleteMany({ where: { expiresAt: { lt: now } } }),
   ]);
 }
