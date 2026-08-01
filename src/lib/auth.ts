@@ -3,7 +3,9 @@ import { cookies } from 'next/headers';
 import { prisma } from './prisma';
 
 export const SESSION_COOKIE = 'padel_session';
-const SESSION_TTL_DAYS = 30;
+// Экспортируется, потому что срок хранения сессии называет ещё и политика
+// обработки данных (app/privacy). Два числа на один срок разошлись бы.
+export const SESSION_TTL_DAYS = 30;
 
 export interface SessionUser {
   id: string;

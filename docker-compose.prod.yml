@@ -20,6 +20,10 @@ services:
       YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
       YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
       YANDEX_REDIRECT_URI: ${YANDEX_REDIRECT_URI:-}
+      # Реквизиты оператора в политике обработки данных. Пусто — останутся
+      # значения по умолчанию из lib/privacy.ts.
+      PRIVACY_OPERATOR: ${PRIVACY_OPERATOR:-}
+      PRIVACY_EMAIL: ${PRIVACY_EMAIL:-}
     # Lets the container reach a Postgres that publishes a port on the NAS
     # itself, via host.docker.internal.
     extra_hosts:
