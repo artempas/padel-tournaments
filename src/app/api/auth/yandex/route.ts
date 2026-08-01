@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { json, requireUser, route } from '@/lib/api';
 import { getCurrentUser } from '@/lib/auth';
 import { beginYandexHandshake, unlinkYandex } from '@/lib/oauth';
-import { safeNext, yandexConfig } from '@/lib/yandex';
+import { resolveOrigin, safeNext, yandexConfig } from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,8 +19,9 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET(request: NextRequest) {
   const next = safeNext(request.nextUrl.searchParams.get('next'));
+  const origin = resolveOrigin(request.headers, request.nextUrl.origin);
   const back = (notice: string) => {
-    const url = new URL(next, request.nextUrl.origin);
+    const url = new URL(next, origin);
     url.searchParams.set('yandex', notice);
     return NextResponse.redirect(url);
   };

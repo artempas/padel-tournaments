@@ -5,6 +5,7 @@ import {
   accountName,
   authorizeUrl,
   identityFrom,
+  resolveOrigin,
   safeNext,
   yandexNotice,
 } from '../src/lib/yandex.ts';
@@ -71,6 +72,15 @@ test('safeNext пропускает только путь внутри прил�
   assert.equal(safeNext('//evil.example'), '/tournaments');
   assert.equal(safeNext('/\\evil.example'), '/tournaments');
   assert.equal(safeNext('tournaments'), '/tournaments');
+});
+
+test('resolveOrigin берёт публичный дом из заголовков прокси', () => {
+  const headers = new Headers({
+    'x-forwarded-proto': 'https',
+    'x-forwarded-host': 'padel.example.com',
+  });
+
+  assert.equal(resolveOrigin(headers, 'http://0.0.0.0:3000'), 'https://padel.example.com');
 });
 
 test('адрес экрана согласия несёт PKCE и state', () => {

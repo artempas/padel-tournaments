@@ -50,6 +50,22 @@ export function yandexConfig(): YandexConfig | null {
 }
 
 /**
+ * Публичный origin запроса, учитывая заголовки прокси.
+ */
+export function resolveOrigin(headers: Headers | undefined, fallback: string): string {
+  const forwardedProto = headers?.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const forwardedHost = headers?.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const forwardedPort = headers?.get('x-forwarded-port')?.split(',')[0]?.trim();
+
+  if (forwardedProto && forwardedHost) {
+    const host = forwardedPort ? `${forwardedHost}:${forwardedPort}` : forwardedHost;
+    return `${forwardedProto}://${host}`;
+  }
+
+  return fallback;
+}
+
+/**
  * Redirect URI. По умолчанию собирается из `ORIGIN` — того самого адреса,
  * который приложение и так обязано знать точно ради passkey. Отдельная
  * переменная нужна редко: когда `ORIGIN` перечисляет несколько адресов и

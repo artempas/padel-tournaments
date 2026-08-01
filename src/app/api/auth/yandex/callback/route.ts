@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSession, getCurrentUser, pruneExpired } from '@/lib/auth';
 import { linkYandex, signInWithYandex, takeHandshake } from '@/lib/oauth';
-import { exchangeCode, fetchUserInfo, identityFrom, yandexConfig } from '@/lib/yandex';
+import { exchangeCode, fetchUserInfo, identityFrom, resolveOrigin, yandexConfig } from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,9 +19,10 @@ export async function GET(request: NextRequest) {
   // брошенная не должна пережить сама себя.
   const handshake = await takeHandshake();
   const next = handshake?.next ?? '/';
+  const origin = resolveOrigin(request.headers, request.nextUrl.origin);
 
   const back = (notice: string) => {
-    const url = new URL(next, request.nextUrl.origin);
+    const url = new URL(next, origin);
     url.searchParams.set('yandex', notice);
     return NextResponse.redirect(url);
   };
@@ -63,7 +64,7 @@ export async function GET(request: NextRequest) {
     await pruneExpired();
 
     // Вход состоялся — сообщать не о чем, дальше обычное приложение.
-    return NextResponse.redirect(new URL(next, request.nextUrl.origin));
+    return NextResponse.redirect(new URL(next, origin));
   } catch (failure) {
     console.error('yandex sign-in failed', failure);
     return back('failed');
