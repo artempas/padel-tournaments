@@ -27,21 +27,50 @@ function check(label, fn) {
 
 await client.connect();
 
+/**
+ * Аккаунт с личным клубом и готовой сессией.
+ *
+ * Клуб обязателен: ростер и турниры принадлежат ему, и аккаунт без клуба API
+ * просто не пустит. Владелец, его игрок и членство пишутся одной транзакцией —
+ * порознь их запрещают отложенные триггеры.
+ */
+async function seedAccount(name) {
+  const created = await client.query(
+    'INSERT INTO users (username, username_key, display_name) VALUES ($1, $1, $1) RETURNING id',
+    [name],
+  );
+  const id = created.rows[0].id;
+
+  await client.query('BEGIN');
+  const club = await client.query(
+    "INSERT INTO clubs (name, icon, color) VALUES ($1, '🎾', 'lime') RETURNING id",
+    [`Клуб ${name}`.slice(0, 40)],
+  );
+  await client.query(
+    'INSERT INTO people (club_id, name, name_key, user_id) VALUES ($1, $2, $2, $3)',
+    [club.rows[0].id, name, id],
+  );
+  await client.query(
+    "INSERT INTO club_members (club_id, user_id, role) VALUES ($1, $2, 'owner')",
+    [club.rows[0].id, id],
+  );
+  await client.query('COMMIT');
+
+  const sessionToken = randomBytes(32).toString('base64url');
+  // token_hash — bytea, поэтому digest() без 'hex'.
+  await client.query(
+    "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')",
+    [createHash('sha256').update(sessionToken).digest(), id],
+  );
+
+  return { id, clubId: club.rows[0].id, cookie: `padel_session=${sessionToken}` };
+}
+
 const username = `smoke-${Date.now()}`;
-const { rows } = await client.query(
-  'INSERT INTO users (username, username_key, display_name) VALUES ($1, $1, $1) RETURNING id',
-  [username],
-);
-const userId = rows[0].id;
-
-const token = randomBytes(32).toString('base64url');
-// token_hash — bytea, поэтому digest() без 'hex'.
-await client.query(
-  "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')",
-  [createHash('sha256').update(token).digest(), userId],
-);
-
-const cookie = `padel_session=${token}`;
+const owner = await seedAccount(username);
+const userId = owner.id;
+const clubId = owner.clubId;
+const cookie = owner.cookie;
 
 async function api(path, init = {}) {
   const res = await fetch(`${BASE}${path}`, {
@@ -232,7 +261,16 @@ try {
   });
 
   console.log('\nroster');
-  const roster = (await api('/api/roster')).body.players;
+  // Свой игрок владельца клуба тоже лежит в ростере — участник клуба это
+  // всегда и игрок клуба. Проверки ниже про тех, кого вписали в турнир, так
+  // что владельца из выборки убираем.
+  const entered = (list) => list.filter((p) => p.name !== username);
+
+  const all = (await api('/api/roster')).body.players;
+  check('the club owner is a player of their own club', () =>
+    assert.ok(all.some((p) => p.name === username && p.matches === 0)));
+
+  const roster = entered(all);
   check('every entered player is saved to the roster', () =>
     assert.equal(roster.length, players.length));
   check('roster names match what was entered', () =>
@@ -257,7 +295,7 @@ try {
   check('second tournament created', () => assert.equal(repeat.status, 201));
   const secondId = repeat.body.id;
 
-  const afterRepeat = (await api('/api/roster')).body.players;
+  const afterRepeat = entered((await api('/api/roster')).body.players);
   check('the same names do not duplicate the roster', () =>
     assert.equal(afterRepeat.length, players.length));
   check('roster ids are stable across tournaments', () =>
@@ -273,7 +311,7 @@ try {
       body: JSON.stringify({ score1: 10, score2: 6 }),
     });
   }
-  const cumulative = (await api('/api/roster')).body.players;
+  const cumulative = entered((await api('/api/roster')).body.players);
   check('points accumulate across tournaments', () => {
     const total = cumulative.reduce((sum, p) => sum + p.pointsFor, 0);
     assert.equal(total, 14 * 16 * 2 * 2);
@@ -293,7 +331,7 @@ try {
   });
   check('a tournament with differently-cased names is accepted', () =>
     assert.equal(shouted.status, 201));
-  const afterCase = (await api('/api/roster')).body.players;
+  const afterCase = entered((await api('/api/roster')).body.players);
   check('roster still holds one entry per person', () =>
     assert.equal(afterCase.length, players.length));
 
@@ -301,9 +339,16 @@ try {
   const victim = afterCase[0];
   const removedPlayer = await api(`/api/roster/${victim.id}`, { method: 'DELETE' });
   check('roster player deleted', () => assert.equal(removedPlayer.status, 200));
-  const afterDelete = (await api('/api/roster')).body.players;
+  const afterDelete = entered((await api('/api/roster')).body.players);
   check('player is gone from the roster', () =>
     assert.equal(afterDelete.length, players.length - 1));
+  // За игроком владельца стоит аккаунт, и спрятать его нельзя: получился бы
+  // участник клуба, которого в клубе не видно.
+  const own = all.find((p) => p.name === username);
+  const refusedArchive = await api(`/api/roster/${own.id}`, { method: 'DELETE' });
+  check('a player with an account behind them cannot be archived', () =>
+    assert.equal(refusedArchive.status, 400));
+
   const survivingTournament = (await api(`/api/tournaments/${secondId}`)).body.tournament;
   check('deleting a roster player keeps played tournaments intact', () => {
     assert.equal(survivingTournament.players.length, players.length);
@@ -413,20 +458,131 @@ try {
   });
 
   console.log('\nisolation');
-  const otherUser = await client.query(
-    'INSERT INTO users (username, username_key, display_name) VALUES ($1, $1, $1) RETURNING id',
-    [`${username}-other`],
-  );
-  const otherToken = randomBytes(32).toString('base64url');
-  await client.query(
-    "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')",
-    [createHash('sha256').update(otherToken).digest(), otherUser.rows[0].id],
-  );
+  const stranger = await seedAccount(`${username}-other`);
   const foreign = await fetch(`${BASE}/api/tournaments/${id}`, {
-    headers: { cookie: `padel_session=${otherToken}` },
+    headers: { cookie: stranger.cookie },
   });
-  check("another organiser cannot read someone else's tournament", () =>
+  check('a tournament of another club is not readable', () =>
     assert.equal(foreign.status, 404));
+
+  console.log('\nclub roles');
+  // Гость приходит по ссылке-приглашению и называется одним из игроков клуба —
+  // тем самым, что уже играл в турнире выше. Дальше проверяется ровно то, что
+  // отличает участника от администратора.
+  const guest = await seedAccount(`${username}-guest`);
+  const guestApi = (path, init = {}) =>
+    fetch(`${BASE}${path}`, {
+      ...init,
+      headers: { 'content-type': 'application/json', cookie: guest.cookie, ...(init.headers ?? {}) },
+    }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => ({})) }));
+
+  // Отдельный, ещё не доигранный турнир: у завершённого участник счёт менять
+  // не вправе, и на нём проверялось бы не то правило.
+  const live = await api('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Live americano', players, courts: 2, pointsPerMatch: 16 }),
+  });
+  const liveId = live.body.id;
+
+  const invited = await api(`/api/clubs/${clubId}/invite`, { method: 'POST' });
+  check('invite link issued', () => assert.equal(invited.status, 201));
+  const inviteToken = invited.body.invite?.token;
+
+  const preview = await guestApi(`/api/invites/${inviteToken}`);
+  check('invite shows the club and its free players', () => {
+    assert.equal(preview.body.club?.id, clubId);
+    assert.ok(preview.body.free.length > 0);
+  });
+
+  // Первый игрок турнира: у него точно есть матчи, и счёт в них гость должен
+  // получить право вносить.
+  const mine = preview.body.free.find((p) => p.name === 'Артём') ?? preview.body.free[0];
+  const joined = await guestApi(`/api/invites/${inviteToken}`, {
+    method: 'POST',
+    body: JSON.stringify({ personId: mine.id }),
+  });
+  check('guest joins the club as that player', () => assert.equal(joined.status, 200));
+
+  const seenByGuest = await guestApi(`/api/tournaments/${liveId}`);
+  check('a member sees every tournament of the club', () =>
+    assert.equal(seenByGuest.status, 200));
+
+  const guestCreate = await guestApi('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Не выйдет', players, courts: 2 }),
+  });
+  check('a member cannot create a tournament', () => assert.equal(guestCreate.status, 403));
+
+  const guestClose = await guestApi(`/api/tournaments/${liveId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ closedEarly: true }),
+  });
+  check('a member cannot finish a tournament', () => assert.equal(guestClose.status, 403));
+
+  const guestDelete = await guestApi(`/api/tournaments/${liveId}`, { method: 'DELETE' });
+  check('a member cannot delete a tournament', () => assert.equal(guestDelete.status, 403));
+
+  const board = seenByGuest.body.tournament;
+  const mySeat = board.players.find((p) => p.name === mine.name);
+  const ownMatch = board.matches.find(
+    (m) => [...m.team1, ...m.team2].includes(mySeat.id),
+  );
+  const otherMatch = board.matches.find(
+    (m) => ![...m.team1, ...m.team2].includes(mySeat.id),
+  );
+
+  const ownScore = await guestApi(`/api/tournaments/${liveId}/matches/${ownMatch.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ score1: 9, score2: 7 }),
+  });
+  check('a member scores a match they play in', () => assert.equal(ownScore.status, 200));
+
+  if (otherMatch) {
+    const foreignScore = await guestApi(`/api/tournaments/${liveId}/matches/${otherMatch.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ score1: 9, score2: 7 }),
+    });
+    check("a member cannot score someone else's match", () =>
+      assert.equal(foreignScore.status, 403));
+  }
+
+  const promoted = await api(`/api/clubs/${clubId}/members/${guest.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  check('owner promotes a member to admin', () => assert.equal(promoted.status, 200));
+
+  const asAdmin = await guestApi(`/api/tournaments/${liveId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ closedEarly: true }),
+  });
+  check('an admin finishes the tournament early', () => assert.equal(asAdmin.status, 200));
+  await guestApi(`/api/tournaments/${liveId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ closedEarly: false }),
+  });
+
+  const selfPromote = await guestApi(`/api/clubs/${clubId}/members/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role: 'member' }),
+  });
+  check('an admin cannot demote the owner', () => assert.equal(selfPromote.status, 403));
+
+  const left = await guestApi(`/api/clubs/${clubId}/membership`, { method: 'DELETE' });
+  check('a member leaves the club', () => assert.equal(left.status, 200));
+
+  const afterLeaving = await guestApi(`/api/tournaments/${liveId}`);
+  check('leaving takes the tournaments away', () => assert.equal(afterLeaving.status, 404));
+
+  const freedAgain = await client.query(
+    'SELECT user_id FROM people WHERE id = $1',
+    [mine.id],
+  );
+  check('the player stays in the roster, anonymous again', () =>
+    assert.equal(freedAgain.rows[0].user_id, null));
+
+  const ownerLeaves = await api(`/api/clubs/${clubId}/membership`, { method: 'DELETE' });
+  check('the owner cannot leave their own club', () => assert.equal(ownerLeaves.status, 400));
 
   console.log('\ncleanup');
   const removed = await api(`/api/tournaments/${id}`, { method: 'DELETE' });
@@ -435,9 +591,12 @@ try {
   check('deleted tournament is gone', () => assert.equal(gone.status, 404));
 
   // Турниры сносим первыми: tournament_players держит people через RESTRICT,
-  // и при удалении пользователя порядок каскадов не определён.
-  const accounts = [userId, otherUser.rows[0].id];
-  await client.query('DELETE FROM tournaments WHERE owner_id = ANY($1)', [accounts]);
+  // и при удалении клуба порядок каскадов не определён.
+  const clubs = [clubId, stranger.clubId];
+  const accounts = [userId, stranger.id, guest.id];
+  await client.query('DELETE FROM tournaments WHERE club_id = ANY($1)', [clubs]);
+  await client.query('DELETE FROM clubs WHERE id = ANY($1)', [clubs]);
+  await client.query('DELETE FROM clubs WHERE id = $1', [guest.clubId]);
   await client.query('DELETE FROM users WHERE id = ANY($1)', [accounts]);
 } finally {
   await client.end();

@@ -1,4 +1,4 @@
-# Схема данных v2 — диаграммы
+# Схема данных — диаграммы
 
 ## Таблицы
 
@@ -7,9 +7,14 @@ erDiagram
     users ||--o{ credentials         : "passkeys"
     users ||--o{ sessions            : "сессии"
     users ||--o{ webauthn_challenges : "челленджи"
-    users ||--o{ tournaments         : "owner_id"
-    users ||--o{ people              : "owner_id — ростер организатора"
-    users |o--o{ people              : "user_id — свой аккаунт (задел)"
+    users ||--o{ club_members        : "членство"
+    users |o--o{ tournaments         : "created_by_id — кто завёл"
+    users |o--o| people              : "user_id — игрок этого аккаунта в клубе"
+
+    clubs ||--o{ club_members        : "состав с ролями"
+    clubs ||--o{ people              : "ростер клуба"
+    clubs ||--o{ tournaments         : "турниры клуба"
+    clubs ||--o{ club_invites        : "ссылки-приглашения"
 
     people      ||--o{ tournament_players : "кто именно"
     tournaments ||--o{ tournament_players : "состав"
@@ -58,12 +63,38 @@ erDiagram
         timestamptz expires_at
     }
 
+    clubs {
+        uuid     id           PK
+        text     name         "1..40"
+        text     icon         "эмодзи из набора"
+        text     color        "имя из палитры"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    club_members {
+        uuid     club_id      PK,FK
+        uuid     user_id      PK,FK
+        enum     role         "member | admin | owner"
+        timestamptz joined_at
+    }
+
+    club_invites {
+        uuid     id            PK
+        uuid     club_id       FK
+        bytea    token_hash    UK "sha256 токена из ссылки"
+        uuid     created_by_id FK "nullable"
+        timestamptz expires_at
+        timestamptz revoked_at "выпуск новой гасит прежнюю"
+        timestamptz created_at
+    }
+
     people {
         uuid     id           PK
-        uuid     owner_id     FK "чей ростер"
+        uuid     club_id      FK "чей ростер"
         text     name         "как ввёл организатор"
-        text     name_key     UK "normalizeKey(name), уникально с owner_id"
-        uuid     user_id      FK "nullable — личный аккаунт игрока"
+        text     name_key     UK "normalizeKey(name), уникально с club_id"
+        uuid     user_id      FK "nullable, уникально с club_id — чей это игрок"
         timestamptz archived_at "вместо удаления"
         timestamptz created_at
         timestamptz updated_at
@@ -71,7 +102,8 @@ erDiagram
 
     tournaments {
         uuid     id               PK
-        uuid     owner_id         FK
+        uuid     club_id          FK
+        uuid     created_by_id    FK "nullable — кто завёл"
         text     name
         enum     format           "americano | mexicano | team_americano"
         smallint courts           "1..16"
@@ -124,6 +156,13 @@ flowchart TB
         E["CONSTRAINT TRIGGER<br/>DEFERRABLE"] --> E1["ровно четверо,<br/>не трое"]
     end
 
+    subgraph cl["клубы"]
+        direction TB
+        H["CONSTRAINT TRIGGER<br/>club_members_single_owner"] --> H1["в клубе ровно<br/>один владелец"]
+        I["CONSTRAINT TRIGGER<br/>club_members_have_player<br/>+ people_link_is_member"] --> I1["участник связан с игроком,<br/>игрок с аккаунтом — участник"]
+        J["UNIQUE (club_id, user_id)<br/>на people"] --> J1["один аккаунт —<br/>один игрок в клубе"]
+    end
+
     subgraph m["matches"]
         direction TB
         F["CHECK score_a IS NULL<br/>= score_b IS NULL"] --> F1["матч сыгран<br/>целиком или никак"]
@@ -151,5 +190,5 @@ flowchart LR
 
     TO -.-> S1["is_finished, finished_at,<br/>closed_early, счётчики"]
     TS -.-> S2["итоговая таблица турнира"]
-    PC -.-> S3["сводка по человеку<br/>за всё время"]
+    PC -.-> S3["сводка по человеку<br/>за всё время, в рамках клуба"]
 ```

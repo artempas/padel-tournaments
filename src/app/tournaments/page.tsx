@@ -1,9 +1,11 @@
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
+import ClubSwitcher from '@/components/ClubSwitcher';
 import LogoutButton from '@/components/LogoutButton';
 import ThemeToggle from '@/components/ThemeToggle';
-import { getCurrentUser } from '@/lib/auth';
+import { listMyClubs } from '@/lib/club-context';
+import { pageMembership } from '@/lib/club-page';
 import { formatLabel, tournamentSize } from '@/lib/formats';
+import { can } from '@/lib/permissions';
 import { listRoster } from '@/lib/roster';
 import { listTournaments } from '@/lib/tournaments';
 
@@ -12,27 +14,52 @@ export const dynamic = 'force-dynamic';
 const dateFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' });
 
 export default async function TournamentsPage() {
-  const user = await getCurrentUser();
-  if (!user) redirect('/');
+  const { club, role, user, personName } = await pageMembership();
 
-  const [tournaments, roster] = await Promise.all([
-    listTournaments(user.id),
-    listRoster(user.id),
+  const [tournaments, roster, clubs] = await Promise.all([
+    listTournaments(club.id),
+    listRoster(club.id),
+    listMyClubs(user.id),
   ]);
   const rosterSize = roster.length;
+  const mayCreate = can(role, 'tournament:create');
 
   return (
     <main className="mx-auto w-full max-w-2xl px-4 pb-28 pt-6 sm:px-6">
-      <header className="mb-6 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-xs uppercase tracking-wide text-muted">Организатор</p>
-          <h1 className="truncate text-xl font-bold">{user.displayName}</h1>
+      <header className="mb-6 flex items-center gap-2">
+        {/* Клуб задаёт всё, что ниже, поэтому он и стоит первым — это не
+            украшение шапки, а то, в каком разрезе смотрят на данные. */}
+        <div className="min-w-0 flex-1">
+          <ClubSwitcher current={club} clubs={clubs} />
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <ThemeToggle />
-          <LogoutButton />
-        </div>
+        <ThemeToggle />
+        <LogoutButton />
       </header>
+
+      <div className="mb-4 grid grid-cols-2 gap-3">
+        <Link
+          href="/club/me"
+          className="card flex items-center gap-2 p-3 transition active:scale-[0.99]"
+        >
+          <span className="text-xl">🎾</span>
+          <span className="min-w-0">
+            {/* Имя игрока в этом клубе, а не аккаунта: в турнирах и таблице
+                человек фигурирует именно так. */}
+            <span className="block truncate text-sm font-semibold">{personName}</span>
+            <span className="block text-xs text-muted">Мой профиль</span>
+          </span>
+        </Link>
+        <Link
+          href="/club"
+          className="card flex items-center gap-2 p-3 transition active:scale-[0.99]"
+        >
+          <span className="text-xl">⚙️</span>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold">Клуб</span>
+            <span className="block text-xs text-muted">Игроки и участники</span>
+          </span>
+        </Link>
+      </div>
 
       {rosterSize > 0 && (
         <Link
@@ -55,7 +82,9 @@ export default async function TournamentsPage() {
           <div className="mb-3 text-4xl">🎾</div>
           <h2 className="text-lg font-semibold">Пока нет турниров</h2>
           <p className="mx-auto mt-2 max-w-xs text-sm text-muted">
-            Заведите список игроков и число кортов — расписание составится само.
+            {mayCreate
+              ? 'Заведите список игроков и число кортов — расписание составится само.'
+              : 'Турниры заводят администраторы клуба. Как только появится первый, он будет здесь.'}
           </p>
         </div>
       ) : (
@@ -113,16 +142,18 @@ export default async function TournamentsPage() {
         </ul>
       )}
 
-      <div className="fixed inset-x-0 bottom-0 border-t border-line bg-ink/95 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-4 backdrop-blur sm:px-6">
-        <div className="mx-auto max-w-2xl">
-          <Link
-            href="/tournaments/new"
-            className="tap flex items-center justify-center rounded-xl bg-accent px-4 font-bold text-accent-ink"
-          >
-            Новый турнир
-          </Link>
+      {mayCreate && (
+        <div className="fixed inset-x-0 bottom-0 border-t border-line bg-ink/95 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-4 backdrop-blur sm:px-6">
+          <div className="mx-auto max-w-2xl">
+            <Link
+              href="/tournaments/new"
+              className="tap flex items-center justify-center rounded-xl bg-accent px-4 font-bold text-accent-ink"
+            >
+              Новый турнир
+            </Link>
+          </div>
         </div>
-      </div>
+      )}
     </main>
   );
 }

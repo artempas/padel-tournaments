@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 import NewTournamentForm from '@/components/NewTournamentForm';
 import { ApiError } from '@/lib/api';
-import { getCurrentUser } from '@/lib/auth';
+import { pageMembership } from '@/lib/club-page';
+import { can } from '@/lib/permissions';
 import { listRoster } from '@/lib/roster';
 import { loadTournament } from '@/lib/tournaments';
 import { randomTournamentName } from '@/lib/tournament-names';
@@ -14,11 +15,13 @@ export default async function NewTournamentPage({
 }: {
   searchParams: Promise<{ from?: string }>;
 }) {
-  const user = await getCurrentUser();
-  if (!user) redirect('/');
+  const { club, role } = await pageMembership();
+  // Участнику здесь делать нечего: API его всё равно не пустит, а пустая форма
+  // с отказом в конце — худший способ об этом сообщить.
+  if (!can(role, 'tournament:create')) redirect('/tournaments');
 
   const { from } = await searchParams;
-  const roster = await listRoster(user.id);
+  const roster = await listRoster(club.id);
 
   // `?from=<id>` repeats an earlier tournament: same people, same settings.
   let players: string[] | undefined;
@@ -30,7 +33,7 @@ export default async function NewTournamentPage({
 
   if (from) {
     try {
-      const source = await loadTournament(from, user.id);
+      const source = await loadTournament(from, club.id);
       players = source.players.map((p) => p.name);
       courts = source.courts;
       pointsPerMatch = source.pointsPerMatch;

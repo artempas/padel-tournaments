@@ -1,4 +1,5 @@
-import { json, readJson, requireUser, route } from '@/lib/api';
+import { json, readJson, route } from '@/lib/api';
+import { requireMembershipForTournament } from '@/lib/club-context';
 import { setMatchScore } from '@/lib/tournaments';
 
 export const dynamic = 'force-dynamic';
@@ -11,14 +12,17 @@ interface Body {
 }
 
 export const PATCH = route(async (request: Request, context: Context) => {
-  const user = await requireUser();
   const { id, matchId } = await context.params;
+  const { club, role, personId } = await requireMembershipForTournament(id);
   const body = await readJson<Body>(request);
 
+  // Кто именно вправе трогать этот матч, решает setMatchScore: участнику
+  // нужно стоять в четвёрке, и проверяется это по составу, а не по словам
+  // клиента.
   const tournament = await setMatchScore(
     id,
     matchId,
-    user.id,
+    { clubId: club.id, role, personId },
     body.score1 ?? null,
     body.score2 ?? null,
   );

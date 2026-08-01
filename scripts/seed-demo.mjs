@@ -16,12 +16,22 @@ const username = 'demo';
 // RESTRICT — это защищает историю от случайного удаления человека. Но при
 // удалении самого пользователя Postgres не гарантирует, в каком порядке
 // отработают каскады, и проверка RESTRICT может сработать раньше, чем уедут
-// участники. Поэтому сносим турниры явно, а уже потом аккаунт: к этому
+// участники. Поэтому сносим турниры явно, а уже потом клуб: к этому
 // моменту на people никто не ссылается, и каскад проходит.
-await client.query(
-  'DELETE FROM tournaments WHERE owner_id IN (SELECT id FROM users WHERE username_key = $1)',
+//
+// Клуб сносится целиком, а не аккаунт: ростер и турниры теперь принадлежат
+// ему. Аккаунт уезжает следом — вместе с ним пропадёт и членство.
+const clubs = await client.query(
+  `SELECT c.id FROM clubs c
+     JOIN club_members m ON m.club_id = c.id
+     JOIN users u ON u.id = m.user_id
+    WHERE u.username_key = $1 AND m.role = 'owner'`,
   [username],
 );
+for (const club of clubs.rows) {
+  await client.query('DELETE FROM tournaments WHERE club_id = $1', [club.id]);
+  await client.query('DELETE FROM clubs WHERE id = $1', [club.id]);
+}
 await client.query('DELETE FROM users WHERE username_key = $1', [username]);
 
 const { rows } = await client.query(
@@ -29,6 +39,24 @@ const { rows } = await client.query(
   [username],
 );
 const userId = rows[0].id;
+
+// Клуб с владельцем и его игроком — одной транзакцией: участник без игрока и
+// клуб без владельца запрещены отложенными триггерами.
+await client.query('BEGIN');
+const club = await client.query(
+  `INSERT INTO clubs (name, icon, color) VALUES ($1, '🎾', 'lime') RETURNING id`,
+  [`Клуб ${username}`],
+);
+const clubId = club.rows[0].id;
+await client.query(
+  'INSERT INTO people (club_id, name, name_key, user_id) VALUES ($1, $2, $2, $3)',
+  [clubId, username, userId],
+);
+await client.query(
+  `INSERT INTO club_members (club_id, user_id, role) VALUES ($1, $2, 'owner')`,
+  [clubId, userId],
+);
+await client.query('COMMIT');
 
 const token = randomBytes(32).toString('base64url');
 // token_hash теперь bytea, а не hex-строка.

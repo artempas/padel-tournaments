@@ -17,9 +17,10 @@ import {
   type RoundMatch,
 } from './mexicano';
 import { normalizeKey } from './normalize';
+import { canScore, isAtLeast, type ClubRole } from './permissions';
 import { prisma } from './prisma';
 import { START_RATING, type Rating } from './rating';
-import { ratingsForOwner, upsertPeople } from './roster';
+import { ratingsForClub, upsertPeople } from './roster';
 import { computeStandings } from './standings';
 import type {
   Match,
@@ -166,7 +167,8 @@ async function insertMatches(
 }
 
 export async function createTournament(
-  ownerId: string,
+  clubId: string,
+  createdById: string,
   input: CreateTournamentInput,
 ): Promise<string> {
   const { name, players, courts, pointsPerMatch, format, rounds } = validateCreateInput(input);
@@ -180,15 +182,16 @@ export async function createTournament(
       : planRound(1, firstRound(players.length, courts));
 
   return prisma.$transaction(async (tx) => {
-    // Everyone entered here joins the organiser's permanent roster, which is
-    // what makes cross-tournament totals possible.
-    const people = await upsertPeople(tx, ownerId, players);
+    // Everyone entered here joins the club's permanent roster, which is what
+    // makes cross-tournament totals possible.
+    const people = await upsertPeople(tx, clubId, players);
 
     // Участники заводятся вместе с турниром: seat N совпадает с индексом N,
     // по которому генератор расставил игроков в расписании.
     const tournament = await tx.tournament.create({
       data: {
-        ownerId,
+        clubId,
+        createdById,
         name,
         courts,
         pointsPerMatch,
@@ -231,13 +234,13 @@ interface OverviewRow {
  * Список турниров берётся из вью: счётчик сыгранных матчей — это count с
  * условием, а такой агрегат по связи Prisma выразить не умеет.
  */
-export async function listTournaments(ownerId: string): Promise<TournamentSummary[]> {
+export async function listTournaments(clubId: string): Promise<TournamentSummary[]> {
   const rows = await prisma.$queryRaw<OverviewRow[]>`
     SELECT id, name, courts, format, rounds_planned, points_per_match,
            completed_at, closed_at, created_at,
            player_count, match_count, played_count
       FROM tournament_overview
-     WHERE owner_id = ${ownerId}::uuid
+     WHERE club_id = ${clubId}::uuid
      ORDER BY created_at DESC
   `;
 
@@ -304,11 +307,11 @@ function readBoard(t: BoardRows): { players: Player[]; matches: Match[] } {
   return { players, matches };
 }
 
-export async function loadTournament(id: string, ownerId: string): Promise<TournamentDetail> {
+export async function loadTournament(id: string, clubId: string): Promise<TournamentDetail> {
   const tournamentId = parseUuid(id, 'Турнир не найден');
 
   const t = await prisma.tournament.findFirst({
-    where: { id: tournamentId, ownerId },
+    where: { id: tournamentId, clubId },
     select: {
       id: true,
       name: true,
@@ -328,7 +331,7 @@ export async function loadTournament(id: string, ownerId: string): Promise<Tourn
   // Рейтинг участников на момент, когда они сюда пришли: всё, что сыграно
   // раньше этого турнира. Ключ меняется с человека на его место в турнире —
   // матчи и таблица знают игроков только так.
-  const ratings = await ratingsForOwner(ownerId, { id: t.id, createdAt: t.createdAt });
+  const ratings = await ratingsForClub(clubId, { id: t.id, createdAt: t.createdAt });
   const ratingBefore: Record<string, Rating> = {};
   for (const p of t.players) {
     ratingBefore[p.id] = ratings.get(p.personId) ?? { rating: START_RATING, matches: 0 };
@@ -348,10 +351,67 @@ export async function loadTournament(id: string, ownerId: string): Promise<Tourn
   };
 }
 
-export async function deleteTournament(id: string, ownerId: string): Promise<void> {
+/**
+ * Место человека в этом турнире, если он в нём играет.
+ *
+ * Матчи и таблица знают игроков только по `TournamentPlayer.id`, поэтому
+ * экрану нужен именно он, а не человек из ростера. `null` — обычное дело:
+ * участник клуба вполне может смотреть турнир, в котором не играл.
+ */
+export async function myPlayerId(
+  tournamentId: string,
+  personId: string,
+): Promise<string | null> {
+  const row = await prisma.tournamentPlayer.findFirst({
+    where: { tournamentId, personId },
+    select: { id: true },
+  });
+  return row?.id ?? null;
+}
+
+export async function deleteTournament(id: string, clubId: string): Promise<void> {
   const tournamentId = parseUuid(id, 'Турнир не найден');
-  const { count } = await prisma.tournament.deleteMany({ where: { id: tournamentId, ownerId } });
+  const { count } = await prisma.tournament.deleteMany({ where: { id: tournamentId, clubId } });
   if (count === 0) throw new ApiError('Турнир не найден', 404);
+}
+
+/** Кто вносит счёт: клуб, роль в нём и свой игрок. */
+export interface ScoreActor {
+  clubId: string;
+  role: ClubRole;
+  /** Игрок, которым актор выступает в клубе; есть у каждого участника. */
+  personId: string;
+}
+
+/**
+ * Пускает к счёту или отказывает словами.
+ *
+ * Админу достаточно роли, поэтому лишний запрос за составом матча делается
+ * только для участника — а это как раз тот случай, когда матч уже открыт на
+ * экране и один индексный поиск ничего не стоит.
+ */
+async function assertMayScore(
+  actor: ScoreActor,
+  tournamentId: string,
+  matchId: string,
+  t: { completedAt: Date | null; closedAt: Date | null },
+): Promise<void> {
+  const running = t.completedAt === null && t.closedAt === null;
+
+  if (isAtLeast(actor.role, 'admin')) return;
+
+  if (!running) {
+    throw new ApiError('Турнир завершён — счёт может изменить только администратор клуба', 403);
+  }
+
+  const playing = await prisma.matchParticipant.findFirst({
+    where: { matchId, tournamentId, player: { personId: actor.personId } },
+    select: { tournamentPlayerId: true },
+  });
+
+  if (!canScore(actor.role, { playing: playing !== null, running })) {
+    throw new ApiError('Счёт в этом матче вносят те, кто в нём играет', 403);
+  }
 }
 
 /**
@@ -359,11 +419,15 @@ export async function deleteTournament(id: string, ownerId: string): Promise<voi
  * points-per-match, which is what makes "16 очков на матч" a hard rule rather
  * than a convention. База проверяет это же ограничением matches_score_sum —
  * здесь проверка нужна лишь затем, чтобы вернуть внятный текст вместо 500.
+ *
+ * Единственное действие с турниром, доступное обычному участнику клуба: свой
+ * матч он считает сам, пока турнир идёт. Что значит «свой», решается здесь, а
+ * не на клиенте — по строкам match_participants.
  */
 export async function setMatchScore(
   tournamentId: string,
   matchId: string,
-  ownerId: string,
+  actor: ScoreActor,
   score1: number | null,
   score2: number | null,
 ): Promise<TournamentDetail> {
@@ -371,10 +435,12 @@ export async function setMatchScore(
   const mid = parseUuid(matchId, 'Матч не найден');
 
   const t = await prisma.tournament.findFirst({
-    where: { id: tid, ownerId },
-    select: { pointsPerMatch: true },
+    where: { id: tid, clubId: actor.clubId },
+    select: { pointsPerMatch: true, completedAt: true, closedAt: true },
   });
   if (!t) throw new ApiError('Турнир не найден', 404);
+
+  await assertMayScore(actor, tid, mid, t);
 
   const clearing = score1 === null && score2 === null;
   if (!clearing) {
@@ -399,7 +465,7 @@ export async function setMatchScore(
     await refreshCompletion(tx, tid);
   });
 
-  return loadTournament(tid, ownerId);
+  return loadTournament(tid, actor.clubId);
 }
 
 /**
@@ -493,7 +559,7 @@ async function refreshCompletion(tx: Prisma.TransactionClient, tournamentId: str
  */
 export async function extendTournament(
   tournamentId: string,
-  ownerId: string,
+  clubId: string,
   extraRounds: number,
 ): Promise<TournamentDetail> {
   const tid = parseUuid(tournamentId, 'Турнир не найден');
@@ -504,7 +570,7 @@ export async function extendTournament(
 
   await prisma.$transaction(async (tx) => {
     const t = await tx.tournament.findFirst({
-      where: { id: tid, ownerId },
+      where: { id: tid, clubId },
       select: {
         format: true,
         courts: true,
@@ -565,7 +631,7 @@ export async function extendTournament(
     await refreshCompletion(tx, tid);
   });
 
-  return loadTournament(tid, ownerId);
+  return loadTournament(tid, clubId);
 }
 
 /**
@@ -574,13 +640,13 @@ export async function extendTournament(
  */
 export async function setTournamentClosed(
   tournamentId: string,
-  ownerId: string,
+  clubId: string,
   closed: boolean,
 ): Promise<TournamentDetail> {
   const tid = parseUuid(tournamentId, 'Турнир не найден');
 
   const owned = await prisma.tournament.findFirst({
-    where: { id: tid, ownerId },
+    where: { id: tid, clubId },
     select: { closedAt: true },
   });
   if (!owned) throw new ApiError('Турнир не найден', 404);
@@ -588,10 +654,10 @@ export async function setTournamentClosed(
   // Повторное закрытие не сдвигает метку — по той же причине, что и completed_at.
   if (closed !== (owned.closedAt !== null)) {
     await prisma.tournament.updateMany({
-      where: { id: tid, ownerId },
+      where: { id: tid, clubId },
       data: { closedAt: closed ? new Date() : null },
     });
   }
 
-  return loadTournament(tid, ownerId);
+  return loadTournament(tid, clubId);
 }

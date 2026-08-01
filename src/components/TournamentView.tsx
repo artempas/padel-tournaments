@@ -19,6 +19,7 @@ import {
   type MatchBalance,
 } from '@/lib/insights';
 import { MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
+import { can, canScore, type ClubRole } from '@/lib/permissions';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
 import { useOptimisticState } from '@/lib/optimistic';
 import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending-scores';
@@ -53,7 +54,17 @@ const BALANCE_TONE = [
   'bg-danger/15 text-danger',
 ];
 
-export default function TournamentView({ initial }: { initial: TournamentDetail }) {
+export default function TournamentView({
+  initial,
+  role,
+  myPlayerId,
+}: {
+  initial: TournamentDetail;
+  /** Роль в клубе, которому принадлежит турнир. */
+  role: ClubRole;
+  /** Место смотрящего в этом турнире, если он в нём играет. */
+  myPlayerId: string | null;
+}) {
   const router = useRouter();
   // `server` is the tournament as far as the organiser is concerned — server
   // state plus changes that are on the screen but not yet confirmed;
@@ -78,6 +89,25 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
 
   const tournament = useMemo(() => applyPendingScores(server, pending), [server, pending]);
   const pendingIds = useMemo(() => new Set(pending.map((p) => p.matchId)), [pending]);
+
+  // Права. Скрытая кнопка — вежливость, а не защита: те же правила проверяет
+  // сервер, и `can` здесь тот же самый, что там.
+  const mayManage = can(role, 'tournament:close');
+  const mayDelete = can(role, 'tournament:delete');
+  const mayCreate = can(role, 'tournament:create');
+
+  /**
+   * Можно ли вносить счёт в конкретный матч. Участнику — только в свой и
+   * только пока турнир идёт; администратору — всегда.
+   */
+  const mayScore = useCallback(
+    (match: Match): boolean =>
+      canScore(role, {
+        playing: myPlayerId !== null && [...match.team1, ...match.team2].includes(myPlayerId),
+        running: tournament.status !== 'finished',
+      }),
+    [role, myPlayerId, tournament.status],
+  );
 
   const sync = useCallback(async () => {
     setSyncing(true);
@@ -462,7 +492,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             <p className="mt-0.5 text-sm text-muted">Ни одного матча не сыграно.</p>
           )}
           <div className="mt-3 flex flex-col gap-2">
-            {tournament.closedEarly && remaining > 0 && (
+            {mayManage && tournament.closedEarly && remaining > 0 && (
               <button
                 type="button"
                 onClick={() => setClosed(false)}
@@ -471,7 +501,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                 Продолжить турнир
               </button>
             )}
-            {extra >= MIN_ROUNDS && (
+            {mayManage && extra >= MIN_ROUNDS && (
               <button
                 type="button"
                 onClick={() => {
@@ -545,6 +575,18 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
 
       {activeTab === 'matches' ? (
         <div className="flex flex-col gap-6">
+          {/* Карточка чужого матча не нажимается, и молчащая кнопка выглядит
+              поломкой. Одна строка объясняет её раньше, чем в неё ткнут. */}
+          {!mayManage && (
+            <p className="rounded-xl border border-line px-4 py-3 text-sm text-muted">
+              {tournament.status === 'finished'
+                ? 'Турнир завершён — счёт теперь меняют администраторы клуба.'
+                : myPlayerId === null
+                  ? 'Вы не играете в этом турнире — счёт вносят его участники.'
+                  : 'Счёт вносится в матчах, где вы играете. Остальные — только для просмотра.'}
+            </p>
+          )}
+
           {rounds.map(([round, matches]) => {
             const resting = restingInRound(tournament.players, tournament.matches, round);
             const isCurrent = round === currentRound;
@@ -585,6 +627,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
                       <li key={match.id}>
                         <button
                           type="button"
+                          disabled={!mayScore(match)}
                           onClick={() => setEditingId(match.id)}
                           aria-label={
                             `Раунд ${match.round}, корт ${match.court}: ` +
@@ -705,7 +748,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             </p>
           )}
 
-          {extra >= MIN_ROUNDS && (
+          {mayManage && extra >= MIN_ROUNDS && (
             <div className="pt-1">
               {extending ? (
                 <div className="card p-4">
@@ -767,7 +810,7 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             </div>
           )}
 
-          {!isFinished && remaining > 0 && (
+          {mayManage && !isFinished && remaining > 0 && (
             <div className="pt-1">
               {confirmFinish ? (
                 <div className="card p-4">
@@ -894,15 +937,17 @@ export default function TournamentView({ initial }: { initial: TournamentDetail 
             </button>
           )}
 
-          <Link
-            href={`/tournaments/new?from=${tournament.id}`}
-            className="tap flex items-center justify-center rounded-xl bg-accent px-4 font-bold text-accent-ink"
-          >
-            Новый турнир с этим составом
-          </Link>
+          {mayCreate && (
+            <Link
+              href={`/tournaments/new?from=${tournament.id}`}
+              className="tap flex items-center justify-center rounded-xl bg-accent px-4 font-bold text-accent-ink"
+            >
+              Новый турнир с этим составом
+            </Link>
+          )}
 
           <div className="pt-2">
-            {confirmDelete ? (
+            {!mayDelete ? null : confirmDelete ? (
               <div className="card p-4">
                 <p className="mb-3 text-sm">Удалить турнир вместе со всеми результатами?</p>
                 <div className="flex gap-2">
