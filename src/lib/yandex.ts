@@ -17,15 +17,6 @@ const AUTHORIZE_URL = 'https://oauth.yandex.ru/authorize';
 const TOKEN_URL = 'https://oauth.yandex.ru/token';
 const INFO_URL = 'https://login.yandex.ru/info?format=json';
 
-/**
- * Права, которые запрашиваются на экране согласия.
- *
- * Портрета здесь нет: аватаров в приложении не бывает — игрок это имя в
- * ростере, — а лишняя строка на экране согласия стоит доверия и конверсии.
- * Почта нужна, чтобы человек по ней узнал привязанный аккаунт в своём профиле.
- */
-const SCOPE = 'login:info login:email';
-
 /** Путь коллбэка. Должен совпадать с Redirect URI в настройках приложения. */
 export const CALLBACK_PATH = '/api/auth/yandex/callback';
 
@@ -51,18 +42,26 @@ export function yandexConfig(): YandexConfig | null {
 
 /**
  * Публичный origin запроса, учитывая заголовки прокси.
+ *
+ * `x-forwarded-port` приклеивается не всегда: прокси часто кладёт порт прямо в
+ * `x-forwarded-host`, и второй раз он превращает адрес в `host:3000:3000` —
+ * такой URL не разбирается вовсе, а значит коллбэк отвечает 500 вместо
+ * редиректа. Порт по умолчанию для схемы тоже не нужен: с ним адрес перестаёт
+ * совпадать с `ORIGIN`, хотя обозначает то же самое место.
  */
 export function resolveOrigin(headers: Headers | undefined, fallback: string): string {
   const forwardedProto = headers?.get('x-forwarded-proto')?.split(',')[0]?.trim();
   const forwardedHost = headers?.get('x-forwarded-host')?.split(',')[0]?.trim();
   const forwardedPort = headers?.get('x-forwarded-port')?.split(',')[0]?.trim();
 
-  if (forwardedProto && forwardedHost) {
-    const host = forwardedPort ? `${forwardedHost}:${forwardedPort}` : forwardedHost;
-    return `${forwardedProto}://${host}`;
-  }
+  if (!forwardedProto || !forwardedHost) return fallback;
 
-  return fallback;
+  // `:\d+$` — именно порт, а не двоеточия внутри IPv6-адреса вроде `[::1]`.
+  const hasPort = /:\d+$/.test(forwardedHost);
+  const defaultPort = forwardedProto === 'https' ? '443' : '80';
+  const port = forwardedPort && !hasPort && forwardedPort !== defaultPort ? `:${forwardedPort}` : '';
+
+  return `${forwardedProto}://${forwardedHost}${port}`;
 }
 
 /**
@@ -81,7 +80,14 @@ function redirectUri(): string {
   return `${origin.replace(/\/+$/, '')}${CALLBACK_PATH}`;
 }
 
-/** Адрес экрана согласия Яндекса. */
+/**
+ * Адрес экрана согласия Яндекса.
+ *
+ * Параметра `scope` здесь нет намеренно: приложению не нужны ни имя, ни почта,
+ * а `id` и логин Яндекс отдаёт всякому токену, без всяких прав. Не запрашивая
+ * ничего, мы и не можем запросить лишнего: набор прав целиком задан в кабинете
+ * приложения, и код на него не влияет.
+ */
 export function authorizeUrl(
   config: YandexConfig,
   params: { state: string; codeChallenge: string },
@@ -90,7 +96,6 @@ export function authorizeUrl(
     response_type: 'code',
     client_id: config.clientId,
     redirect_uri: config.redirectUri,
-    scope: SCOPE,
     state: params.state,
     code_challenge: params.codeChallenge,
     code_challenge_method: 'S256',
@@ -150,7 +155,14 @@ export async function exchangeCode(
   return data.access_token;
 }
 
-/** Ответ login.yandex.ru — только те поля, которые даёт запрошенный scope. */
+/**
+ * Ответ login.yandex.ru.
+ *
+ * Наверняка приходят только `id` и `login` — их Яндекс отдаёт всякому токену.
+ * Остальное зависит от прав приложения, и при нынешних не приходит вовсе;
+ * поля описаны, чтобы расширение прав в кабинете подхватилось само, без правки
+ * кода. Поэтому все они необязательные — и разбор к этому готов.
+ */
 export interface YandexUserInfo {
   id?: string;
   login?: string;
@@ -209,9 +221,12 @@ export function identityFrom(info: YandexUserInfo): YandexIdentity {
 /**
  * Имя аккаунта из профиля Яндекса.
  *
- * Порядок предпочтений — от того, как человек сам себя называет, к тому, чем
- * его называет система: `display_name` он задаёт сам, имя с фамилией приходят
- * из паспорта аккаунта, логин остаётся на случай, когда не отдано ничего.
+ * При нынешних правах приложения имени не приходит, и остаётся логин — под ним
+ * человек и появится в ростере, пока не переименует себя сам. Остальные ветки
+ * не мёртвые: они разбирают то, что Яндекс начнёт присылать, если права в
+ * кабинете расширят. Порядок в них — от того, как человек назвал себя сам, к
+ * тому, как его называет система.
+ *
  * Пустым результат не бывает: имя видно в турнирной таблице, и «» там хуже
  * любой замены.
  */
