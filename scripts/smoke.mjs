@@ -129,6 +129,19 @@ try {
   const unlink = await api('/api/auth/yandex', { method: 'DELETE' });
   check('unlinking is a no-op when nothing is linked', () => assert.equal(unlink.status, 200));
 
+  // Регистрация заканчивается выбором имени, и кто именно регистрируется —
+  // знает сервер, а не запрос. Без начатой регистрации имя ничего не создаёт.
+  const orphan = await fetch(`${BASE}/api/auth/yandex/signup`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Никто' }),
+  });
+  check('a name alone registers nobody', () => assert.equal(orphan.status, 408));
+
+  const welcome = await fetch(`${BASE}/welcome`, { redirect: 'manual' });
+  check('the name screen has nothing to show without a pending signup', () =>
+    assert.equal(new URL(welcome.headers.get('location'), BASE).pathname, '/'));
+
   console.log('\ncreate');
   const players = ['Артём', 'Борис', 'Вера', 'Галина', 'Дмитрий', 'Елена', 'Женя', 'Зоя'];
   const created = await api('/api/tournaments', {
@@ -510,10 +523,22 @@ try {
   // тем самым, что уже играл в турнире выше. Дальше проверяется ровно то, что
   // отличает участника от администратора.
   const guest = await seedAccount(`${username}-guest`);
+
+  // Клуб гостю задаётся явно, и это не мелочь оформления. У него их два: свой
+  // собственный, где он владелец, и тот, куда его позвали, где он участник.
+  // Какой из них текущий, в приложении помнит cookie `padel_club`; без неё
+  // берётся первый по времени вступления — то есть свой, — и «участник не
+  // создаёт турнир» проверялось бы там, где он владелец, а значит вправе.
+  // Браузер эту cookie получает при вступлении в клуб, а `fetch` здесь ответные
+  // cookie не собирает, поэтому она проставляется руками.
   const guestApi = (path, init = {}) =>
     fetch(`${BASE}${path}`, {
       ...init,
-      headers: { 'content-type': 'application/json', cookie: guest.cookie, ...(init.headers ?? {}) },
+      headers: {
+        'content-type': 'application/json',
+        cookie: `${guest.cookie}; padel_club=${clubId}`,
+        ...(init.headers ?? {}),
+      },
     }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => ({})) }));
 
   // Отдельный, ещё не доигранный турнир: у завершённого участник счёт менять

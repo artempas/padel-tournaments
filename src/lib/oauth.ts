@@ -1,5 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { cookies } from 'next/headers';
+import { ApiError } from './api';
 import { CLUB_NAME_MAX } from './club-style';
 import { createClub } from './clubs';
 import { uniqueViolationOn } from './db-errors';
@@ -122,81 +123,187 @@ async function findAccount(subject: string): Promise<{ userId: string } | null> 
 }
 
 /**
- * Заводит аккаунт под человека из Яндекса — вместе с личным клубом, ровно как
- * при регистрации по passkey: аккаунт без клуба показывать нечего.
+ * Вход знакомым Яндексом. `null` значит, что такого мы не знаем — это не
+ * ошибка, а новый человек, и дальше его ждёт выбор имени.
  *
- * Имя приходится подбирать: в Яндексе оно какое угодно, а `users.username_key`
- * уникален. Занятость проверяется вставкой, а не запросом перед ней — между
- * запросом и вставкой имя всё равно может занять кто-то другой.
+ * Слияния с существующим аккаунтом по почте нет намеренно. Почты приложение
+ * теперь и не видит, а доверять чужому адресу как доказательству «это тот же
+ * человек» значило бы отдавать аккаунт всякому, кто заведёт себе такой же
+ * ящик. Связать входы можно только изнутри: войдя своим passkey и нажав
+ * «привязать».
  */
-async function createUserFor(identity: YandexIdentity): Promise<string> {
-  for (let attempt = 1; ; attempt++) {
-    // «Артём», «Артём 2», «Артём 3» — тёзке видно, что имя занято, и он может
-    // ни о чём не догадываться: оно его собственное, просто с номером.
-    const username =
-      attempt === 1 ? identity.name : `${identity.name.slice(0, NAME_MAX - 4).trim()} ${attempt}`;
+export async function signInWithYandex(identity: YandexIdentity): Promise<string | null> {
+  const existing = await findAccount(identity.subject);
+  if (!existing) return null;
 
-    try {
-      const user = await prisma.user.create({
-        data: {
-          username,
-          usernameKey: normalizeKey(username),
-          displayName: username,
-          oauthAccounts: {
-            create: {
-              provider: 'yandex',
-              providerAccountId: identity.subject,
-              login: identity.login,
-              email: identity.email,
-            },
-          },
-        },
-        select: { id: true, displayName: true },
-      });
-
-      await createClub(user.id, {
-        name: `Клуб ${user.displayName}`.slice(0, CLUB_NAME_MAX),
-        icon: '🎾',
-        color: 'lime',
-        playerName: user.displayName.slice(0, NAME_MAX),
-      });
-
-      return user.id;
-    } catch (error) {
-      // Тёзка. Пробуем следующий номер — но не бесконечно: сотня занятых
-      // подряд означает не тёзок, а что-то сломанное.
-      if (uniqueViolationOn(error, 'username_key') && attempt < 100) continue;
-
-      // Гонка двух вкладок одного человека: связь с этим Яндексом успела
-      // появиться, пока мы её заводили. Победила первая вставка, и она же
-      // назовёт аккаунт — второй попытке остаётся им воспользоваться.
-      if (uniqueViolationOn(error, 'provider_account_id')) {
-        const existing = await findAccount(identity.subject);
-        if (existing) return existing.userId;
-      }
-
-      throw error;
-    }
-  }
+  await touchAccount(identity);
+  return existing.userId;
 }
 
 /**
- * Вход: находит аккаунт по id Яндекса или заводит новый.
+ * Регистрация, отложенная до выбора имени.
  *
- * Слияния с существующим аккаунтом по почте нет намеренно. Почты у аккаунтов
- * с passkey не бывает вовсе — сливать не с чем, — а доверять чужому адресу
- * как доказательству «это тот же человек» значит отдавать аккаунт всякому,
- * кто заведёт себе такой же ящик. Связать входы можно только изнутри: войдя
- * своим passkey и нажав «привязать».
+ * Между «Яндекс подтвердил, кто это» и «аккаунт создан» появляется разговор:
+ * человек называет себя сам, а не получает в турнирную таблицу свой логин.
+ * До конца разговора аккаунта не существует — бросил на полпути, и не осталось
+ * ничего.
  */
-export async function signInWithYandex(identity: YandexIdentity): Promise<string> {
-  const existing = await findAccount(identity.subject);
-  if (existing) {
-    await touchAccount(identity);
-    return existing.userId;
+const SIGNUP_COOKIE = 'padel_signup';
+const SIGNUP_TTL_MS = 15 * 60_000;
+
+export async function beginSignup(identity: YandexIdentity, next: string): Promise<void> {
+  const row = await prisma.oauthSignup.create({
+    data: {
+      provider: 'yandex',
+      providerAccountId: identity.subject,
+      login: identity.login,
+      email: identity.email,
+      next: safeNext(next),
+      expiresAt: new Date(Date.now() + SIGNUP_TTL_MS),
+    },
+    select: { id: true },
+  });
+
+  const store = await cookies();
+  store.set(SIGNUP_COOKIE, row.id, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: SIGNUP_TTL_MS / 1000,
+  });
+}
+
+export interface PendingSignup {
+  /** Логин у провайдера — им подсказывается имя, если своё не придумалось. */
+  suggestion: string;
+  next: string;
+}
+
+/** Читает начатую регистрацию, не тратя её: экрану нужно лишь показать форму. */
+export async function peekSignup(): Promise<PendingSignup | null> {
+  const store = await cookies();
+  const id = store.get(SIGNUP_COOKIE)?.value;
+  if (!id) return null;
+
+  // Кривой id — не исключение, а просто отсутствие регистрации: на нечитаемый
+  // uuid Postgres отвечает ошибкой типа, и она здесь означает ровно «нет».
+  const row = await prisma.oauthSignup
+    .findFirst({
+      where: { id, expiresAt: { gt: new Date() } },
+      select: { login: true, next: true },
+    })
+    .catch(() => null);
+  if (!row) return null;
+
+  return { suggestion: (row.login ?? '').slice(0, NAME_MAX), next: safeNext(row.next) };
+}
+
+/** Регистрация отыграна: строка больше не нужна, кука тем более. */
+async function discardSignup(
+  id: string,
+  store: Awaited<ReturnType<typeof cookies>>,
+): Promise<void> {
+  store.delete(SIGNUP_COOKIE);
+  await prisma.oauthSignup.deleteMany({ where: { id } }).catch(() => {});
+}
+
+/**
+ * Проверка имени. Та же, что при регистрации по passkey: слишком короткое имя
+ * ничего не говорит о человеке ни в ростере, ни в списке участников.
+ */
+const NAME_MIN = 2;
+
+function validateName(input: unknown): string {
+  const name = String(input ?? '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+  if (name.length < NAME_MIN || name.length > NAME_MAX) {
+    throw new ApiError(`Имя от ${NAME_MIN} до ${NAME_MAX} символов`);
+  }
+  return name;
+}
+
+/**
+ * Завершение регистрации: аккаунт с выбранным именем и личный клуб — ровно
+ * как при регистрации по passkey, аккаунт без клуба показывать нечего.
+ *
+ * Кто регистрируется, берётся из базы, а не из запроса: клиент присылает одно
+ * лишь имя.
+ *
+ * Начатая регистрация не тратится на неудачную попытку — иначе «такое имя уже
+ * занято» означало бы «идите на Яндекс заново», хотя человеку достаточно
+ * придумать другое имя. Единственность аккаунта держится не на этом, а на
+ * уникальности связи с Яндексом: второй раз тем же `id` аккаунт не завести,
+ * сколько бы вкладок ни пыталось разом.
+ */
+export async function completeSignup(name: unknown): Promise<{ userId: string; next: string }> {
+  const username = validateName(name);
+
+  const store = await cookies();
+  const id = store.get(SIGNUP_COOKIE)?.value;
+
+  const pending = id
+    ? await prisma.oauthSignup
+        .findFirst({
+          where: { id, expiresAt: { gt: new Date() } },
+          select: { providerAccountId: true, login: true, email: true, next: true },
+        })
+        .catch(() => null)
+    : null;
+
+  if (!id || !pending) {
+    store.delete(SIGNUP_COOKIE);
+    throw new ApiError('Регистрация истекла — войдите через Яндекс ещё раз', 408);
   }
 
-  return createUserFor(identity);
+  let user: { id: string; displayName: string };
+  try {
+    user = await prisma.user.create({
+      data: {
+        username,
+        usernameKey: normalizeKey(username),
+        displayName: username,
+        oauthAccounts: {
+          create: {
+            provider: 'yandex',
+            providerAccountId: pending.providerAccountId,
+            login: pending.login,
+            email: pending.email,
+          },
+        },
+      },
+      select: { id: true, displayName: true },
+    });
+  } catch (error) {
+    // Имя выбрал человек, и занятое имя — его дело, а не повод придумывать за
+    // него замену с номером. Так же отвечает и регистрация по passkey. Форма
+    // остаётся на экране, начатая регистрация — в базе.
+    if (uniqueViolationOn(error, 'username_key')) {
+      throw new ApiError('Такое имя уже занято', 409);
+    }
+
+    // Тем временем этот же Яндекс успел завести аккаунт в другой вкладке.
+    // Регистрировать нечего, и держать начатую больше незачем.
+    if (uniqueViolationOn(error, 'provider_account_id')) {
+      await discardSignup(id, store);
+      throw new ApiError('Этот Яндекс ID уже зарегистрирован — войдите им', 409);
+    }
+
+    throw error;
+  }
+
+  await createClub(user.id, {
+    name: `Клуб ${user.displayName}`.slice(0, CLUB_NAME_MAX),
+    icon: '🎾',
+    color: 'lime',
+    playerName: user.displayName.slice(0, NAME_MAX),
+  });
+
+  await discardSignup(id, store);
+
+  return { userId: user.id, next: safeNext(pending.next) };
 }
 
 /**
