@@ -89,6 +89,46 @@ try {
   const anon = await fetch(`${BASE}/api/tournaments`);
   check('anonymous access is rejected', () => assert.equal(anon.status, 401));
 
+  // Вход через Яндекс целиком отсюда не проверить: экран согласия проходит
+  // живой человек. Проверяется то, что от Яндекса не зависит, — рукопожатие до
+  // ухода и разбор возвращения.
+  console.log('\nyandex id');
+  const start = await fetch(`${BASE}/api/auth/yandex?next=%2Fjoin%2Fabc`, { redirect: 'manual' });
+  const startedTo = new URL(start.headers.get('location'));
+  const configured = startedTo.host === 'oauth.yandex.ru';
+
+  if (!configured) {
+    check('without app keys the button leads nowhere but back', () =>
+      assert.equal(startedTo.searchParams.get('yandex'), 'off'));
+  } else {
+    check('authorization request carries PKCE and state', () => {
+      assert.equal(startedTo.searchParams.get('response_type'), 'code');
+      assert.equal(startedTo.searchParams.get('code_challenge_method'), 'S256');
+      assert.ok(startedTo.searchParams.get('code_challenge'));
+      assert.ok(startedTo.searchParams.get('state'));
+    });
+    check('the handshake leaves an httpOnly cookie behind', () =>
+      assert.match(start.headers.get('set-cookie') ?? '', /padel_oauth=[^;]+;.*HttpOnly/i));
+    check('the app secret never reaches the browser', () =>
+      assert.equal(startedTo.searchParams.get('client_secret'), null));
+  }
+
+  const denied = await fetch(`${BASE}/api/auth/yandex/callback?error=access_denied`, {
+    redirect: 'manual',
+  });
+  check('a cancelled consent screen is not an error page', () =>
+    assert.equal(new URL(denied.headers.get('location')).searchParams.get('yandex'), 'denied'));
+
+  // Чужой code без нашей куки — то самое, от чего защищает state.
+  const forged = await fetch(`${BASE}/api/auth/yandex/callback?code=stolen&state=forged`, {
+    redirect: 'manual',
+  });
+  check('a callback nobody here started is refused', () =>
+    assert.equal(new URL(forged.headers.get('location')).searchParams.get('yandex'), 'expired'));
+
+  const unlink = await api('/api/auth/yandex', { method: 'DELETE' });
+  check('unlinking is a no-op when nothing is linked', () => assert.equal(unlink.status, 200));
+
   console.log('\ncreate');
   const players = ['Артём', 'Борис', 'Вера', 'Галина', 'Дмитрий', 'Елена', 'Женя', 'Зоя'];
   const created = await api('/api/tournaments', {

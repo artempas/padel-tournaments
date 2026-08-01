@@ -8,6 +8,7 @@ import {
   startRegistration,
 } from '@simplewebauthn/browser';
 import ThemeToggle from './ThemeToggle';
+import YandexButton from './YandexButton';
 import { failureMessage, request } from '@/lib/request';
 
 type Mode = 'login' | 'register';
@@ -28,11 +29,17 @@ function postJson<T>(url: string, body?: unknown): Promise<T> {
 export default function AuthScreen({
   next = '/tournaments',
   intro,
+  yandex = false,
+  notice,
 }: {
   /** Куда вести после входа: с ссылки-приглашения — обратно на неё. */
   next?: string;
   /** Строка над формой, если человек пришёл не просто так. */
   intro?: string;
+  /** Подключён ли вход через Яндекс ID — решают переменные окружения. */
+  yandex?: boolean;
+  /** Чем кончился прошлый поход на Яндекс, если он был. */
+  notice?: string;
 } = {}) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>('login');
@@ -96,6 +103,14 @@ export default function AuthScreen({
       </header>
 
       <div className="card p-5">
+        {/* Сообщение о прошлой попытке входа через Яндекс: приходит в адресе
+            после коллбэка и живёт до следующей навигации. */}
+        {notice && (
+          <p className="mb-5 rounded-xl border border-line bg-ink px-4 py-3 text-sm text-muted">
+            {notice}
+          </p>
+        )}
+
         <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl bg-ink p-1">
           {(['login', 'register'] as Mode[]).map((m) => (
             <button
@@ -153,12 +168,25 @@ export default function AuthScreen({
                 : 'Войти через passkey'}
           </button>
         </form>
+
+        {/* Кнопки нет, пока не заданы ключи приложения Яндекса: показывать
+            вход, который не работает, хуже, чем не показывать его вовсе. */}
+        {yandex && (
+          <>
+            <div className="my-4 flex items-center gap-3 text-xs text-muted">
+              <span className="h-px flex-1 bg-line" />
+              или
+              <span className="h-px flex-1 bg-line" />
+            </div>
+            <YandexButton next={next} />
+          </>
+        )}
       </div>
 
       <p className="text-center text-xs leading-relaxed text-muted">
-        Вход только по passkey — отпечаток, Face ID или PIN устройства.
-        <br />
-        Паролей нет.
+        {yandex
+          ? 'Вход по passkey — отпечаток, Face ID или PIN устройства — либо через Яндекс ID. Паролей нет.'
+          : 'Вход только по passkey — отпечаток, Face ID или PIN устройства. Паролей нет.'}
       </p>
     </main>
   );
