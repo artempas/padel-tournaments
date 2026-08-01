@@ -132,7 +132,7 @@ export default function AuthScreen({
         <form onSubmit={submit} className="flex flex-col gap-4">
           <label className="flex flex-col gap-2">
             <span className="text-sm font-medium text-muted">
-              Имя{' '}
+              Никнейм{' '}
               {mode === 'login' && <span className="font-normal">(можно не заполнять)</span>}
             </span>
             <input
