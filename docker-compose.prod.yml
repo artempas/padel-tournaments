@@ -16,6 +16,10 @@ services:
       RP_ID: ${RP_ID:?set RP_ID in .env}
       ORIGIN: ${ORIGIN:?set ORIGIN in .env}
       RP_NAME: ${RP_NAME:-Padel Tournaments}
+      # Вход через Яндекс ID. Пусто — кнопки нет, всё остальное работает.
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
+      YANDEX_REDIRECT_URI: ${YANDEX_REDIRECT_URI:-}
     # Lets the container reach a Postgres that publishes a port on the NAS
     # itself, via host.docker.internal.
     extra_hosts:

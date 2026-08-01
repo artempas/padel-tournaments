@@ -39,6 +39,15 @@ enum ChallengeKind {
   @@map("challenge_kind")
 }
 
+// Внешние провайдеры входа. Пока один, но перечислением, а не текстом: имя
+// провайдера участвует в первичном ключе oauth_accounts, и опечатка в нём
+// завела бы вторую учётную запись вместо того, чтобы найти прежнюю.
+enum OauthProvider {
+  yandex
+
+  @@map("oauth_provider")
+}
+
 // Роли идут по возрастанию прав, и порядок здесь значащий: «повысить не выше
 // себя» в lib/permissions.ts сравнивает именно места в этом списке.
 enum ClubRole {
@@ -70,6 +79,7 @@ model User {
   updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
   credentials Credential[]
+  oauthAccounts OauthAccount[]
   sessions    Session[]
   challenges  WebauthnChallenge[]
   memberships ClubMember[]
@@ -99,6 +109,36 @@ model Credential {
 
   @@index([userId])
   @@map("credentials")
+}
+
+// Вход через внешний сервис — второй способ попасть в аккаунт, наравне с
+// passkey. Живёт отдельной таблицей, а не колонками в users, потому что это
+// список: у аккаунта может не быть ни одной такой записи, а провайдеров со
+// временем станет больше одного.
+//
+// Ключ — пара (провайдер, id у провайдера). Именно id, а не логин или почта:
+// логин у Яндекса меняется, почта тоже, а id закреплён за человеком навсегда.
+// Логин и почта здесь — снимок на момент последнего входа, чтобы человеку было
+// видно, какой именно аккаунт привязан; на поиск они не влияют.
+model OauthAccount {
+  provider          OauthProvider
+  providerAccountId String        @map("provider_account_id") @db.Text
+
+  userId String @map("user_id") @db.Uuid
+
+  login String? @db.Text
+  email String? @db.Text
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastLoginAt DateTime @default(now()) @map("last_login_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+  // Один аккаунт — не больше одной учётной записи у провайдера. Иначе «войти
+  // через Яндекс» после привязки второго Яндекса стало бы лотереей.
+  @@unique([userId, provider])
+  @@map("oauth_accounts")
 }
 
 model WebauthnChallenge {

@@ -3,7 +3,10 @@ import { notFound } from 'next/navigation';
 import ClubBadge from '@/components/ClubBadge';
 import ThemeToggle from '@/components/ThemeToggle';
 import { TierIcon, TierSprite } from '@/components/TierIcon';
+import YandexAccount from '@/components/YandexAccount';
 import { pageMembership } from '@/lib/club-page';
+import { linkedYandex } from '@/lib/oauth';
+import { yandexConfig, yandexNotice } from '@/lib/yandex';
 import { ROLE_LABELS } from '@/lib/permissions';
 import { plural } from '@/lib/plural';
 import { CALIBRATION_MATCHES, tierOf } from '@/lib/rating';
@@ -24,10 +27,21 @@ const dateFormat = new Intl.DateTimeFormat('ru-RU', {
  * игрок клуба, за этим следит триггер в базе. Поэтому строка в ростере
  * находится всегда, и ветки «свяжитесь с игроком» на экране не нужно.
  */
-export default async function ClubProfilePage() {
-  const { club, role, personId } = await pageMembership();
+export default async function ClubProfilePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ yandex?: string }>;
+}) {
+  const { club, role, personId, user } = await pageMembership();
+  const { yandex } = await searchParams;
 
-  const stats = await rosterStats(club.id);
+  const showYandex = yandexConfig() !== null;
+  const notice = yandexNotice(yandex);
+
+  const [stats, linked] = await Promise.all([
+    rosterStats(club.id),
+    showYandex ? linkedYandex(user.id) : null,
+  ]);
   const me = stats.find((p) => p.id === personId);
   // Единственный способ сюда попасть — заархивированный игрок, а участника
   // клуба архивировать нельзя. Значит, состояние сломано, и 404 честнее пустой
@@ -121,6 +135,22 @@ export default async function ClubProfilePage() {
         </span>
         <span className="shrink-0 text-muted">→</span>
       </Link>
+
+      {/* Ниже — про аккаунт, а не про клуб: рейтинг и матчи у человека в каждом
+          клубе свои, а вход один на всё приложение. Отдельной страницы под
+          единственную настройку не нужно, но заголовок нужен: без него
+          «привязать Яндекс» читалось бы как что-то клубное. */}
+      {showYandex && (
+        <>
+          <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-muted">Аккаунт</h2>
+          {notice && (
+            <p className="mt-3 rounded-xl border border-line bg-ink px-4 py-3 text-sm text-muted">
+              {notice}
+            </p>
+          )}
+          <YandexAccount linked={linked} />
+        </>
+      )}
     </main>
   );
 }

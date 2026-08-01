@@ -4,20 +4,30 @@ import JoinClubView from '@/components/JoinClubView';
 import { ApiError } from '@/lib/api';
 import { getCurrentUser } from '@/lib/auth';
 import { readInvite } from '@/lib/invites';
+import { yandexConfig, yandexNotice } from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
-export default async function JoinPage({ params }: { params: Promise<{ token: string }> }) {
+export default async function JoinPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ token: string }>;
+  searchParams: Promise<{ yandex?: string }>;
+}) {
   const { token } = await params;
   const user = await getCurrentUser();
 
   // Незнакомому человеку сначала нужен аккаунт: клуб связывает игрока именно
   // с ним. После входа его вернёт сюда же, и приглашение доиграется.
   if (!user) {
+    const { yandex } = await searchParams;
     return (
       <AuthScreen
         next={`/join/${encodeURIComponent(token)}`}
         intro="Вас пригласили в клуб. Войдите или создайте аккаунт — и выберете, кто вы среди игроков."
+        yandex={yandexConfig() !== null}
+        notice={yandexNotice(yandex) ?? undefined}
       />
     );
   }
