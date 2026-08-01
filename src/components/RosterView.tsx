@@ -43,7 +43,16 @@ const dateFormat = new Intl.DateTimeFormat('ru-RU', {
   year: 'numeric',
 });
 
-export default function RosterView({ initial }: { initial: RosterStat[] }) {
+export default function RosterView({
+  initial,
+  clubName,
+  mayArchive,
+}: {
+  initial: RosterStat[];
+  clubName: string;
+  /** Убирать людей из ростера может администратор клуба, не всякий участник. */
+  mayArchive: boolean;
+}) {
   const router = useRouter();
   const { value: players, error, mutate } = useOptimisticState(initial);
   const [sort, setSort] = useState<Sort>('points');
@@ -98,7 +107,10 @@ export default function RosterView({ initial }: { initial: RosterStat[] }) {
         >
           ←
         </Link>
-        <h1 className="min-w-0 flex-1 truncate text-xl font-bold">Игроки</h1>
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-xl font-bold">Игроки</h1>
+          <p className="truncate text-xs text-muted">{clubName}</p>
+        </div>
         <ThemeToggle />
       </header>
 
@@ -262,7 +274,7 @@ export default function RosterView({ initial }: { initial: RosterStat[] }) {
                           </p>
                         )}
 
-                        {pendingDelete === person.id ? (
+                        {!mayArchive ? null : pendingDelete === person.id ? (
                           <div className="mt-3 flex gap-2">
                             <button
                               type="button"
@@ -300,9 +312,16 @@ export default function RosterView({ initial }: { initial: RosterStat[] }) {
             Очки — сумма всех очков, набранных игроком во всех турнирах. Рейтинг растёт за
             результаты лучше ожидаемых и падает за худшие, поэтому крупная победа над сильными
             стоит дороже, чем над слабыми. Все начинают со 100, и первые {CALIBRATION_MATCHES}{' '}
-            матчей вместо ступени стоит вопросительный знак — столько рейтинг ещё пляшет. Удаление
-            из списка не трогает сыгранные турниры: результаты в них останутся, игрок просто
-            перестанет предлагаться при создании нового.
+            матчей вместо ступени стоит вопросительный знак — столько рейтинг ещё пляшет. Всё
+            считается по турнирам этого клуба: тот же человек в другом клубе — другой игрок со
+            своим счётом.
+            {mayArchive && (
+              <>
+                {' '}
+                Удаление из списка не трогает сыгранные турниры: результаты в них останутся, игрок
+                просто перестанет предлагаться при создании нового.
+              </>
+            )}
           </p>
 
           {/* Легенда читает те же пороги, что и tierOf: разойтись с таблицей

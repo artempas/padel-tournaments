@@ -1,13 +1,18 @@
-import { redirect } from 'next/navigation';
 import RosterView from '@/components/RosterView';
-import { getCurrentUser } from '@/lib/auth';
+import { pageMembership } from '@/lib/club-page';
+import { can } from '@/lib/permissions';
 import { rosterStats } from '@/lib/roster';
 
 export const dynamic = 'force-dynamic';
 
 export default async function PlayersPage() {
-  const user = await getCurrentUser();
-  if (!user) redirect('/');
+  const { club, role } = await pageMembership();
 
-  return <RosterView initial={await rosterStats(user.id)} />;
+  return (
+    <RosterView
+      initial={await rosterStats(club.id)}
+      clubName={club.name}
+      mayArchive={can(role, 'roster:archive')}
+    />
+  );
 }

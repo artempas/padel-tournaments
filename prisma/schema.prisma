@@ -39,6 +39,16 @@ enum ChallengeKind {
   @@map("challenge_kind")
 }
 
+// Роли идут по возрастанию прав, и порядок здесь значащий: «повысить не выше
+// себя» в lib/permissions.ts сравнивает именно места в этом списке.
+enum ClubRole {
+  member
+  admin
+  owner
+
+  @@map("club_role")
+}
+
 // ============================================================================
 // Аккаунты и вход
 // ============================================================================
@@ -62,9 +72,10 @@ model User {
   credentials Credential[]
   sessions    Session[]
   challenges  WebauthnChallenge[]
-  tournaments Tournament[]
-  roster      Person[]            @relation("PersonOwner")
+  memberships ClubMember[]
+  createdTournaments Tournament[]
   linkedTo    Person[]            @relation("PersonAccount")
+  invitesMade ClubInvite[]
 
   @@map("users")
 }
@@ -127,6 +138,85 @@ model Session {
 }
 
 // ============================================================================
+// Клубы
+//
+// Ось, по которой всё разложено. Ростер и турниры принадлежат клубу, а не
+// пользователю: аккаунт даёт вход, клуб — данные. Один человек состоит в
+// скольких угодно клубах, и в каждом у него своя роль и свой игрок.
+// ============================================================================
+
+model Club {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  name String @db.Text
+  // Значок клуба: эмодзи и цвет фона из фиксированной палитры (lib/clubs.ts).
+  // Картинки нет намеренно — файлового хранилища в проекте нет, а два
+  // коротких текстовых поля переживают и офлайн, и рендер на сервере.
+  icon  String @db.Text
+  color String @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  members     ClubMember[]
+  people      Person[]
+  tournaments Tournament[]
+  invites     ClubInvite[]
+
+  @@map("clubs")
+}
+
+// Членство: аккаунт, роль и игрок, которым этот человек выступает в клубе.
+//
+// Игрок обязателен — «участник клуба, не связанный с игроком» невозможен по
+// построению. Ссылка на него живёт в people.user_id, а не колонкой здесь:
+// одна дорога к связи вместо двух, и разойтись им негде. Что она есть у
+// каждого участника, стережёт отложенный триггер в миграции — это
+// утверждение про строки чужой таблицы, ограничением его не выразить.
+model ClubMember {
+  clubId String   @map("club_id") @db.Uuid
+  userId String   @map("user_id") @db.Uuid
+  role   ClubRole @default(member)
+
+  joinedAt DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([clubId, userId])
+  @@index([userId])
+  @@map("club_members")
+}
+
+// Ссылка-приглашение. В URL уходит случайный токен, здесь лежит только его
+// sha256 — ровно по той же причине, что и у сессий: дамп базы не должен
+// давать рабочее приглашение.
+//
+// Активная ссылка у клуба одна: выпуск новой гасит прежние (revokedAt).
+// Уникальным индексом это не выразить — «активна» зависит от now(), — да и
+// не нужно: гасит их одним UPDATE тот же код, что выпускает новую.
+model ClubInvite {
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clubId String @map("club_id") @db.Uuid
+
+  tokenHash Bytes @unique @map("token_hash")
+
+  // Кто выпустил. Аккаунт может исчезнуть, ссылка от этого не портится.
+  createdById String? @map("created_by_id") @db.Uuid
+
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  club      Club  @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  createdBy User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([clubId])
+  @@index([expiresAt])
+  @@map("club_invites")
+}
+
+// ============================================================================
 // Люди
 //
 // Единственное место, где живёт имя человека: участник турнира ссылается
@@ -135,27 +225,33 @@ model Session {
 // ============================================================================
 
 model Person {
-  id      String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  ownerId String @map("owner_id") @db.Uuid
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clubId String @map("club_id") @db.Uuid
 
   name    String @db.Text
   nameKey String @map("name_key") @db.Text
 
-  // Задел: когда-нибудь игрок заведёт аккаунт и увидит свою статистику.
+  // Аккаунт, который выступает этим игроком. По умолчанию пусто: игроки клуба
+  // анонимны, пока кто-нибудь не назовёт себя одним из них, приняв
+  // приглашение. Выход из клуба снимает связь обратно.
   userId String? @map("user_id") @db.Uuid
 
   archivedAt DateTime? @map("archived_at") @db.Timestamptz(6)
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  owner   User               @relation("PersonOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  club    Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
   account User?              @relation("PersonAccount", fields: [userId], references: [id], onDelete: SetNull)
   entries TournamentPlayer[]
 
   // Уникальность действует и на архив: повторный ввод имени должен
   // разархивировать человека, а не создать двойника.
-  @@unique([ownerId, nameKey])
-  @@index([ownerId, name])
+  @@unique([clubId, nameKey])
+  // Один аккаунт — не больше одного игрока в клубе. NULL здесь не мешают:
+  // Postgres по умолчанию считает их различными, поэтому анонимных игроков
+  // может быть сколько угодно, а вот назвать себя дважды нельзя.
+  @@unique([clubId, userId])
+  @@index([clubId, name])
   @@map("people")
 }
 
@@ -164,8 +260,12 @@ model Person {
 // ============================================================================
 
 model Tournament {
-  id      String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  ownerId String @map("owner_id") @db.Uuid
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clubId String @map("club_id") @db.Uuid
+
+  // Кто завёл турнир. На права не влияет — их даёт роль в клубе, — но без
+  // этого не ответить на «кто это создал», а аккаунт может и исчезнуть.
+  createdById String? @map("created_by_id") @db.Uuid
 
   name           String           @db.Text
   format         TournamentFormat @default(americano)
@@ -187,11 +287,12 @@ model Tournament {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  owner   User               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  players TournamentPlayer[]
-  matches Match[]
+  club      Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  createdBy User?              @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  players   TournamentPlayer[]
+  matches   Match[]
 
-  @@index([ownerId, createdAt(sort: Desc)])
+  @@index([clubId, createdAt(sort: Desc)])
   @@map("tournaments")
 }
 

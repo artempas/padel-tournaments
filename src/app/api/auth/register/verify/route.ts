@@ -1,6 +1,8 @@
 import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import { ApiError, json, readJson, route } from '@/lib/api';
+import { CLUB_NAME_MAX } from '@/lib/club-style';
+import { createClub } from '@/lib/clubs';
 import { normalizeKey } from '@/lib/normalize';
 import { prisma } from '@/lib/prisma';
 import { consumeChallenge, relyingParty } from '@/lib/webauthn';
@@ -64,6 +66,16 @@ export const POST = route(async (request: Request) => {
       }
       throw err;
     });
+
+  // Личный клуб заводится сразу: аккаунт без клуба показывать нечего, а
+  // «создайте клуб» первым экраном после регистрации — лишний шаг там, где
+  // разумного выбора всё равно нет. Переименовать и позвать людей можно потом.
+  await createClub(user.id, {
+    name: `Клуб ${user.displayName}`.slice(0, CLUB_NAME_MAX),
+    icon: '🎾',
+    color: 'lime',
+    playerName: user.displayName.slice(0, 40),
+  });
 
   await createSession(user.id);
 

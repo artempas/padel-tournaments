@@ -20,11 +20,16 @@ export interface RosterStat extends RosterPlayer {
   lastPlayedAt: string | null;
   /** Клубный рейтинг, округлённый: см. lib/rating.ts. */
   rating: number;
+  /**
+   * За игроком стоит аккаунт: кто-то из участников клуба назвал себя им.
+   * Остальные анонимны — это состояние по умолчанию.
+   */
+  linked: boolean;
 }
 
 /**
- * Adds any unseen names to the organiser's roster and returns every id keyed
- * by normalised name. Existing entries keep their id but adopt the latest
+ * Adds any unseen names to the club roster and returns every id keyed by
+ * normalised name. Existing entries keep their id but adopt the latest
  * spelling, so fixing a typo updates the person rather than duplicating them.
  * A name that was archived comes back — «удалить» здесь значит «спрятать».
  *
@@ -34,7 +39,7 @@ export interface RosterStat extends RosterPlayer {
  */
 export async function upsertPeople(
   tx: Prisma.TransactionClient,
-  ownerId: string,
+  clubId: string,
   names: string[],
 ): Promise<Map<string, string>> {
   const byKey = new Map<string, string>();
@@ -42,8 +47,8 @@ export async function upsertPeople(
   for (const name of names) {
     const nameKey = normalizeKey(name);
     const person = await tx.person.upsert({
-      where: { ownerId_nameKey: { ownerId, nameKey } },
-      create: { ownerId, name, nameKey },
+      where: { clubId_nameKey: { clubId, nameKey } },
+      create: { clubId, name, nameKey },
       update: { name, archivedAt: null },
       select: { id: true },
     });
@@ -53,12 +58,30 @@ export async function upsertPeople(
   return byKey;
 }
 
-export async function listRoster(ownerId: string): Promise<RosterPlayer[]> {
+export async function listRoster(clubId: string): Promise<RosterPlayer[]> {
   return prisma.person.findMany({
-    where: { ownerId, archivedAt: null },
+    where: { clubId, archivedAt: null },
     select: { id: true, name: true },
     orderBy: { nameKey: 'asc' },
   });
+}
+
+/**
+ * Ростер с пометкой «за игроком стоит аккаунт» — для страницы клуба.
+ *
+ * Отдельно от rosterStats: там ради рейтинга прогоняется вся история клуба
+ * матч за матчем, а списку имён это ни к чему.
+ */
+export async function listClubPlayers(
+  clubId: string,
+): Promise<Array<RosterPlayer & { linked: boolean }>> {
+  const rows = await prisma.person.findMany({
+    where: { clubId, archivedAt: null },
+    select: { id: true, name: true, userId: true },
+    orderBy: { nameKey: 'asc' },
+  });
+
+  return rows.map((r) => ({ id: r.id, name: r.name, linked: r.userId !== null }));
 }
 
 interface HistoryRow {
@@ -76,7 +99,7 @@ export interface HistoryCutoff {
 }
 
 /**
- * Сыгранные матчи ростера в том порядке, в каком в них играли.
+ * Сыгранные матчи клуба в том порядке, в каком в них играли.
  *
  * Порядок здесь — не украшение: Elo путезависим, и от него зависит результат.
  * Задаётся он созданием турнира и местом матча в сетке, а не `played_at`: та
@@ -87,7 +110,7 @@ export interface HistoryCutoff {
  * миллисекунду: порядок должен быть определён всегда, иначе один и тот же
  * ростер давал бы разные числа от запроса к запросу.
  */
-async function ratedHistory(ownerId: string, before?: HistoryCutoff): Promise<RatedMatch[]> {
+async function ratedHistory(clubId: string, before?: HistoryCutoff): Promise<RatedMatch[]> {
   const cutoffAt = before?.createdAt ?? null;
   const cutoffId = before?.id ?? null;
 
@@ -97,7 +120,7 @@ async function ratedHistory(ownerId: string, before?: HistoryCutoff): Promise<Ra
       JOIN tournaments t ON t.id = m.tournament_id
       JOIN match_participants mp ON mp.match_id = m.id
       JOIN tournament_players tp ON tp.id = mp.tournament_player_id
-     WHERE t.owner_id = ${ownerId}::uuid
+     WHERE t.club_id = ${clubId}::uuid
        AND m.score_a IS NOT NULL
        AND (${cutoffAt}::timestamptz IS NULL
             OR (t.created_at, t.id) < (${cutoffAt}::timestamptz, ${cutoffId}::uuid))
@@ -146,12 +169,17 @@ function toMatches(rows: HistoryRow[]): RatedMatch[] {
 /**
  * Рейтинг каждого человека в ростере, посчитанный по всей его истории.
  * `before` обрезает историю: так берётся состояние на начало турнира.
+ *
+ * Рейтинг клубный в буквальном смысле: история обрезана границами клуба, и
+ * тот же человек в другом клубе — другой игрок с собственным счётом. Иначе
+ * пришлось бы сравнивать между собой компании, которые никогда не играли
+ * друг с другом.
  */
-export async function ratingsForOwner(
-  ownerId: string,
+export async function ratingsForClub(
+  clubId: string,
   before?: HistoryCutoff,
 ): Promise<Map<string, Rating>> {
-  return computeRatings(await ratedHistory(ownerId, before));
+  return computeRatings(await ratedHistory(clubId, before));
 }
 
 interface CareerRow {
@@ -164,6 +192,7 @@ interface CareerRow {
   wins: bigint;
   tournaments: bigint;
   last_played_at: Date | null;
+  linked: boolean;
 }
 
 /**
@@ -173,19 +202,20 @@ interface CareerRow {
  * на какой стороне матча он стоял, а такой CASE в языке запросов Prisma не
  * выражается. Зато обход идёт по индексам — в v1 здесь был полный скан matches.
  */
-export async function rosterStats(ownerId: string): Promise<RosterStat[]> {
+export async function rosterStats(clubId: string): Promise<RosterStat[]> {
   // Суммы берёт вью, рейтинг — проход по истории: агрегат его не выражает,
   // потому что каждый матч считается от рейтингов, сложившихся к нему.
   const [rows, ratings] = await Promise.all([
     prisma.$queryRaw<CareerRow[]>`
       SELECT person_id AS id, name, points_for, points_against, diff,
-             matches, wins, tournaments, last_played_at
+             matches, wins, tournaments, last_played_at,
+             user_id IS NOT NULL AS linked
         FROM person_career
-       WHERE owner_id = ${ownerId}::uuid
+       WHERE club_id = ${clubId}::uuid
          AND archived_at IS NULL
        ORDER BY points_for DESC, lower(name)
     `,
-    ratingsForOwner(ownerId),
+    ratingsForClub(clubId),
   ]);
 
   return rows.map((r) => ({
@@ -200,6 +230,7 @@ export async function rosterStats(ownerId: string): Promise<RosterStat[]> {
     lastPlayedAt: r.last_played_at?.toISOString() ?? null,
     // Кто ещё не играл, стоит на старте — показать пустоту здесь не лучше.
     rating: Math.round(ratings.get(r.id)?.rating ?? START_RATING),
+    linked: r.linked,
   }));
 }
 
@@ -208,14 +239,29 @@ export async function rosterStats(ownerId: string): Promise<RosterStat[]> {
  * сыгранных турниров, и связь помечена ON DELETE RESTRICT именно затем, чтобы
  * историю нельзя было стереть случайно. Пропадает только подсказка при
  * создании нового турнира.
+ *
+ * Игрока, за которым стоит аккаунт, спрятать нельзя: получился бы участник
+ * клуба, которого в клубе не видно, — а «мой профиль» и статистика читают
+ * ростер. Сначала человек выходит из клуба (или его удаляет владелец), и
+ * связь снимается; после этого игрок обычный и архивируется как все.
  */
-export async function archivePerson(ownerId: string, id: string): Promise<void> {
+export async function archivePerson(clubId: string, id: string): Promise<void> {
   const personId = parseUuid(id, 'Игрок не найден');
 
-  const { count } = await prisma.person.updateMany({
-    where: { id: personId, ownerId, archivedAt: null },
+  const person = await prisma.person.findFirst({
+    where: { id: personId, clubId, archivedAt: null },
+    select: { userId: true },
+  });
+  if (!person) throw new ApiError('Игрок не найден', 404);
+
+  if (person.userId !== null) {
+    throw new ApiError(
+      'За этим игроком закреплён участник клуба — сначала удалите его из клуба',
+    );
+  }
+
+  await prisma.person.updateMany({
+    where: { id: personId, clubId, archivedAt: null },
     data: { archivedAt: new Date() },
   });
-
-  if (count === 0) throw new ApiError('Игрок не найден', 404);
 }

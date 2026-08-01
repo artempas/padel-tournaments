@@ -25,7 +25,15 @@ function postJson<T>(url: string, body?: unknown): Promise<T> {
   return request<T>(url, { method: 'POST', body: JSON.stringify(body ?? {}) });
 }
 
-export default function AuthScreen() {
+export default function AuthScreen({
+  next = '/tournaments',
+  intro,
+}: {
+  /** Куда вести после входа: с ссылки-приглашения — обратно на неё. */
+  next?: string;
+  /** Строка над формой, если человек пришёл не просто так. */
+  intro?: string;
+} = {}) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>('login');
   const [username, setUsername] = useState('');
@@ -61,7 +69,7 @@ export default function AuthScreen() {
     try {
       if (mode === 'register') await handleRegister();
       else await handleLogin();
-      router.replace('/tournaments');
+      router.replace(next);
       router.refresh();
     } catch (err) {
       setError(friendlyError(err));
@@ -82,7 +90,8 @@ export default function AuthScreen() {
         </div>
         <h1 className="text-3xl font-bold tracking-tight">Падел Турниры</h1>
         <p className="mt-2 text-sm text-muted">
-          Американо: каждый играет в паре с каждым. Расписание, счёт и итоговая таблица.
+          {intro ??
+            'Американо: каждый играет в паре с каждым. Расписание, счёт и итоговая таблица.'}
         </p>
       </header>
 

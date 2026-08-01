@@ -21,6 +21,18 @@
   --color-platinum: #6fd7d0;
   --color-diamond: #7ab8ff;
 
+  /* Цвета значка клуба. Отдельная палитра, а не акцент приложения: значок
+     нужен, чтобы отличать клубы друг от друга в селекторе, и одинаковый
+     акцент на всех эту работу не сделал бы. Список повторён в lib/clubs.ts
+     и в CHECK clubs_color_known — Tailwind ищет классы текстом, собрать
+     `bg-club-${id}` из переменной он не может. */
+  --color-club-lime: #c6f24e;
+  --color-club-sky: #62b6ff;
+  --color-club-violet: #b08cff;
+  --color-club-amber: #ffb340;
+  --color-club-rose: #ff8fa3;
+  --color-club-teal: #5fd3c4;
+
   --radius-card: 1rem;
 }
 
@@ -44,6 +56,15 @@
     --color-gold: #97701a;
     --color-platinum: #1c7d76;
     --color-diamond: #1d63b8;
+
+    /* Значок клуба — плашка с эмодзи: цвет здесь фон, а не текст, поэтому
+       притемняется он меньше металлов, иначе эмодзи на нём тонет. */
+    --color-club-lime: #a8d63a;
+    --color-club-sky: #3f97e8;
+    --color-club-violet: #8b63e0;
+    --color-club-amber: #e08a1e;
+    --color-club-rose: #e0647d;
+    --color-club-teal: #2fae9d;
   }
 
   html {

@@ -1,4 +1,6 @@
-import { ApiError, json, readJson, requireUser, route } from '@/lib/api';
+import { ApiError, json, readJson, route } from '@/lib/api';
+import { requireMembershipForTournament } from '@/lib/club-context';
+import { can } from '@/lib/permissions';
 import { extendTournament } from '@/lib/tournaments';
 
 export const dynamic = 'force-dynamic';
@@ -7,11 +9,15 @@ type Context = { params: Promise<{ id: string }> };
 
 /** Продлить турнир: доиграли запланированное, а расходиться рано. */
 export const POST = route(async (request: Request, context: Context) => {
-  const user = await requireUser();
   const { id } = await context.params;
-  const body = await readJson<{ rounds?: unknown }>(request);
+  const { club, role } = await requireMembershipForTournament(id);
 
+  if (!can(role, 'tournament:extend')) {
+    throw new ApiError('Продлевать турнир могут администраторы клуба', 403);
+  }
+
+  const body = await readJson<{ rounds?: unknown }>(request);
   if (body.rounds === undefined) throw new ApiError('Поле rounds обязательно');
 
-  return json({ tournament: await extendTournament(id, user.id, Number(body.rounds)) });
+  return json({ tournament: await extendTournament(id, club.id, Number(body.rounds)) });
 });
