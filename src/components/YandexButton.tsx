@@ -5,9 +5,8 @@
  * основного окна — иначе экрану согласия Яндекса негде открыться. Клиентский
  * JS здесь не нужен вовсе, поэтому компонент серверный.
  *
- * Оформление фирменное и задано конструктором Яндекса — см. утилиту
- * `yandex-button` в globals.css. Логотип оттуда же: красный квадрат со
- * скруглением до круга и белая «Я» внутри.
+ * Фирменный красный и логотип — требование Яндекса к оформлению входа: человек
+ * узнаёт кнопку по виду раньше, чем читает надпись.
  */
 export default function YandexButton({
   next,
@@ -20,14 +19,16 @@ export default function YandexButton({
   const href = next ? `/api/auth/yandex?next=${encodeURIComponent(next)}` : '/api/auth/yandex';
 
   return (
-    <a href={href} className="yandex-button tap transition active:opacity-80">
-      <svg viewBox="0 0 44 44" aria-hidden className="h-6 w-6 shrink-0">
-        <rect width="44" height="44" rx="22" fill="#FC3F1D" />
-        <path
-          d="M24.7407 33.9778H29.0889V9.04443H22.7592C16.3929 9.04443 13.0538 12.303 13.0538 17.1176C13.0538 21.2731 15.2187 23.6163 19.0532 26.1609L21.3832 27.6987L18.3927 25.1907L12.4667 33.9778H17.1818L23.5115 24.5317L21.3098 23.0671C18.6496 21.2731 17.3469 19.8818 17.3469 16.8613C17.3469 14.2068 19.2183 12.4128 22.7776 12.4128H24.7223V33.9778H24.7407Z"
-          fill="#ffffff"
-        />
-      </svg>
+    <a
+      href={href}
+      className="tap flex items-center justify-center gap-2 rounded-xl bg-[#FC3F1D] px-4 font-bold text-white transition active:scale-[0.99]"
+    >
+      <span
+        aria-hidden
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-white text-base font-black leading-none text-[#FC3F1D]"
+      >
+        Я
+      </span>
       {label}
     </a>
   );
