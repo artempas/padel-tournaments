@@ -89,6 +89,59 @@ try {
   const anon = await fetch(`${BASE}/api/tournaments`);
   check('anonymous access is rejected', () => assert.equal(anon.status, 401));
 
+  // Вход через Яндекс целиком отсюда не проверить: экран согласия проходит
+  // живой человек. Проверяется то, что от Яндекса не зависит, — рукопожатие до
+  // ухода и разбор возвращения.
+  console.log('\nyandex id');
+  const start = await fetch(`${BASE}/api/auth/yandex?next=%2Fjoin%2Fabc`, { redirect: 'manual' });
+  const startedTo = new URL(start.headers.get('location'));
+  const configured = startedTo.host === 'oauth.yandex.ru';
+
+  if (!configured) {
+    check('without app keys the button leads nowhere but back', () =>
+      assert.equal(startedTo.searchParams.get('yandex'), 'off'));
+  } else {
+    check('authorization request carries PKCE and state', () => {
+      assert.equal(startedTo.searchParams.get('response_type'), 'code');
+      assert.equal(startedTo.searchParams.get('code_challenge_method'), 'S256');
+      assert.ok(startedTo.searchParams.get('code_challenge'));
+      assert.ok(startedTo.searchParams.get('state'));
+    });
+    check('the handshake leaves an httpOnly cookie behind', () =>
+      assert.match(start.headers.get('set-cookie') ?? '', /padel_oauth=[^;]+;.*HttpOnly/i));
+    check('the app secret never reaches the browser', () =>
+      assert.equal(startedTo.searchParams.get('client_secret'), null));
+  }
+
+  const denied = await fetch(`${BASE}/api/auth/yandex/callback?error=access_denied`, {
+    redirect: 'manual',
+  });
+  check('a cancelled consent screen is not an error page', () =>
+    assert.equal(new URL(denied.headers.get('location')).searchParams.get('yandex'), 'denied'));
+
+  // Чужой code без нашей куки — то самое, от чего защищает state.
+  const forged = await fetch(`${BASE}/api/auth/yandex/callback?code=stolen&state=forged`, {
+    redirect: 'manual',
+  });
+  check('a callback nobody here started is refused', () =>
+    assert.equal(new URL(forged.headers.get('location')).searchParams.get('yandex'), 'expired'));
+
+  const unlink = await api('/api/auth/yandex', { method: 'DELETE' });
+  check('unlinking is a no-op when nothing is linked', () => assert.equal(unlink.status, 200));
+
+  // Регистрация заканчивается выбором имени, и кто именно регистрируется —
+  // знает сервер, а не запрос. Без начатой регистрации имя ничего не создаёт.
+  const orphan = await fetch(`${BASE}/api/auth/yandex/signup`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Никто' }),
+  });
+  check('a name alone registers nobody', () => assert.equal(orphan.status, 408));
+
+  const welcome = await fetch(`${BASE}/welcome`, { redirect: 'manual' });
+  check('the name screen has nothing to show without a pending signup', () =>
+    assert.equal(new URL(welcome.headers.get('location'), BASE).pathname, '/'));
+
   console.log('\ncreate');
   const players = ['Артём', 'Борис', 'Вера', 'Галина', 'Дмитрий', 'Елена', 'Женя', 'Зоя'];
   const created = await api('/api/tournaments', {
@@ -471,31 +524,22 @@ try {
   // отличает участника от администратора.
   const guest = await seedAccount(`${username}-guest`);
 
-  // Настоящий браузер запоминает Set-Cookie и шлёт его дальше сам — в
-  // частности padel_club, который сервер выставляет сразу после вступления
-  // по ссылке. Голый fetch этого не делает, и без явного кукиджара гость
-  // после присоединения к клубу иногда остаётся с «текущим клубом» по
-  // умолчанию — своим личным, — а не тем, в который только что вошёл: оба
-  // членства создаются в одну и ту же миллисекунду локального прогона, и
-  // тогда, чей вход раньше, решает случайный порядок uuid.
-  let guestCookie = guest.cookie;
-  const guestApi = async (path, init = {}) => {
-    const res = await fetch(`${BASE}${path}`, {
+  // Клуб гостю задаётся явно, и это не мелочь оформления. У него их два: свой
+  // собственный, где он владелец, и тот, куда его позвали, где он участник.
+  // Какой из них текущий, в приложении помнит cookie `padel_club`; без неё
+  // берётся первый по времени вступления — то есть свой, — и «участник не
+  // создаёт турнир» проверялось бы там, где он владелец, а значит вправе.
+  // Браузер эту cookie получает при вступлении в клуб, а `fetch` здесь ответные
+  // cookie не собирает, поэтому она проставляется руками.
+  const guestApi = (path, init = {}) =>
+    fetch(`${BASE}${path}`, {
       ...init,
-      headers: { 'content-type': 'application/json', cookie: guestCookie, ...(init.headers ?? {}) },
-    });
-
-    for (const setCookie of res.headers.getSetCookie?.() ?? []) {
-      const [name, value] = setCookie.split(';')[0].split('=');
-      guestCookie = guestCookie
-        .split('; ')
-        .filter((c) => !c.startsWith(`${name}=`))
-        .concat(`${name}=${value}`)
-        .join('; ');
-    }
-
-    return { status: res.status, body: await res.json().catch(() => ({})) };
-  };
+      headers: {
+        'content-type': 'application/json',
+        cookie: `${guest.cookie}; padel_club=${clubId}`,
+        ...(init.headers ?? {}),
+      },
+    }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => ({})) }));
 
   // Отдельный, ещё не доигранный турнир: у завершённого участник счёт менять
   // не вправе, и на нём проверялось бы не то правило.

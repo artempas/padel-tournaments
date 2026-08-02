@@ -1,0 +1,290 @@
+/**
+ * Яндекс ID: сторона протокола.
+ *
+ * Здесь только разговор с Яндексом — адрес экрана согласия, обмен кода на
+ * токен и чтение профиля. Ни сессий, ни базы: что делать с полученным
+ * человеком, решает lib/oauth.ts, а этот модуль ничего не знает о том, есть ли
+ * у нас вообще пользователи.
+ *
+ * Токен Яндекса живёт ровно столько, сколько длится обработка коллбэка: профиль
+ * читается один раз, и наружу уходит уже своя сессия. Поэтому ни access-, ни
+ * refresh-токен нигде не сохраняются — хранить нечего, а значит и утекать
+ * нечему. Понадобятся запросы к API Яндекса от имени человека — придётся
+ * заводить хранилище токенов, сейчас его нет намеренно.
+ */
+
+const AUTHORIZE_URL = 'https://oauth.yandex.ru/authorize';
+const TOKEN_URL = 'https://oauth.yandex.ru/token';
+const INFO_URL = 'https://login.yandex.ru/info?format=json';
+
+/** Путь коллбэка. Должен совпадать с Redirect URI в настройках приложения. */
+export const CALLBACK_PATH = '/api/auth/yandex/callback';
+
+export interface YandexConfig {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+}
+
+/**
+ * Настройки или `null`, если вход через Яндекс не подключён.
+ *
+ * Не исключение: без ключей приложение обязано работать как раньше, просто без
+ * кнопки. Экран входа спрашивает ровно этим — есть настройки, есть кнопка.
+ */
+export function yandexConfig(): YandexConfig | null {
+  const clientId = process.env.YANDEX_CLIENT_ID;
+  const clientSecret = process.env.YANDEX_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+
+  return { clientId, clientSecret, redirectUri: redirectUri() };
+}
+
+/**
+ * Публичный origin запроса, учитывая заголовки прокси.
+ *
+ * `x-forwarded-port` приклеивается не всегда: прокси часто кладёт порт прямо в
+ * `x-forwarded-host`, и второй раз он превращает адрес в `host:3000:3000` —
+ * такой URL не разбирается вовсе, а значит коллбэк отвечает 500 вместо
+ * редиректа. Порт по умолчанию для схемы тоже не нужен: с ним адрес перестаёт
+ * совпадать с `ORIGIN`, хотя обозначает то же самое место.
+ */
+export function resolveOrigin(headers: Headers | undefined, fallback: string): string {
+  const forwardedProto = headers?.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const forwardedHost = headers?.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const forwardedPort = headers?.get('x-forwarded-port')?.split(',')[0]?.trim();
+
+  if (!forwardedProto || !forwardedHost) return fallback;
+
+  // `:\d+$` — именно порт, а не двоеточия внутри IPv6-адреса вроде `[::1]`.
+  const hasPort = /:\d+$/.test(forwardedHost);
+  const defaultPort = forwardedProto === 'https' ? '443' : '80';
+  const port = forwardedPort && !hasPort && forwardedPort !== defaultPort ? `:${forwardedPort}` : '';
+
+  return `${forwardedProto}://${forwardedHost}${port}`;
+}
+
+/**
+ * Redirect URI. По умолчанию собирается из `ORIGIN` — того самого адреса,
+ * который приложение и так обязано знать точно ради passkey. Отдельная
+ * переменная нужна редко: когда `ORIGIN` перечисляет несколько адресов и
+ * зарегистрирован в Яндексе не первый из них.
+ */
+function redirectUri(): string {
+  const explicit = process.env.YANDEX_REDIRECT_URI;
+  if (explicit) return explicit;
+
+  const origin = process.env.ORIGIN?.split(',')[0]?.trim();
+  if (!origin) throw new Error('ORIGIN must be set — see .env.example');
+
+  return `${origin.replace(/\/+$/, '')}${CALLBACK_PATH}`;
+}
+
+/**
+ * Адрес экрана согласия Яндекса.
+ *
+ * Параметра `scope` здесь нет намеренно: приложению не нужны ни имя, ни почта,
+ * а `id` и логин Яндекс отдаёт всякому токену, без всяких прав. Не запрашивая
+ * ничего, мы и не можем запросить лишнего: набор прав целиком задан в кабинете
+ * приложения, и код на него не влияет.
+ */
+export function authorizeUrl(
+  config: YandexConfig,
+  params: { state: string; codeChallenge: string },
+): string {
+  const query = new URLSearchParams({
+    response_type: 'code',
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
+    state: params.state,
+    code_challenge: params.codeChallenge,
+    code_challenge_method: 'S256',
+  });
+
+  return `${AUTHORIZE_URL}?${query.toString()}`;
+}
+
+interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  refresh_token?: string;
+  scope?: string;
+}
+
+/**
+ * Обмен кода на токен.
+ *
+ * Отправляется и секрет приложения, и PKCE-верификатор. Яндекс не требует
+ * секрета при PKCE, но приложение серверное: секрет доказывает, что за кодом
+ * пришли мы, верификатор — что пришли с того же устройства, с которого код
+ * запрашивали. Одно другого не заменяет.
+ */
+export async function exchangeCode(
+  config: YandexConfig,
+  code: string,
+  codeVerifier: string,
+): Promise<string> {
+  const response = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      code_verifier: codeVerifier,
+    }),
+    cache: 'no-store',
+  });
+
+  const data = (await response.json().catch(() => ({}))) as Partial<TokenResponse> & {
+    error?: string;
+    error_description?: string;
+  };
+
+  if (!response.ok || !data.access_token) {
+    // Самая частая причина — код старше десяти минут (invalid_grant) или
+    // повторный обмен того же кода. Текст от Яндекса нужен в логе, наружу он
+    // не идёт: человеку он ничего не объясняет.
+    throw new Error(
+      `yandex token exchange failed: ${data.error ?? response.status} ${data.error_description ?? ''}`.trim(),
+    );
+  }
+
+  return data.access_token;
+}
+
+/**
+ * Ответ login.yandex.ru.
+ *
+ * Наверняка приходят только `id` и `login` — их Яндекс отдаёт всякому токену.
+ * Остальное зависит от прав приложения, и при нынешних не приходит вовсе;
+ * поля описаны, чтобы расширение прав в кабинете подхватилось само, без правки
+ * кода. Поэтому все они необязательные — и разбор к этому готов.
+ */
+export interface YandexUserInfo {
+  id?: string;
+  login?: string;
+  default_email?: string;
+  emails?: string[];
+  first_name?: string;
+  last_name?: string;
+  display_name?: string;
+  real_name?: string;
+}
+
+export async function fetchUserInfo(accessToken: string): Promise<YandexUserInfo> {
+  const response = await fetch(INFO_URL, {
+    headers: { authorization: `OAuth ${accessToken}` },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`yandex userinfo failed: ${response.status}`);
+  }
+
+  return (await response.json()) as YandexUserInfo;
+}
+
+/**
+ * Человек из Яндекса в том виде, в каком он нужен приложению.
+ *
+ * `subject` — это `id` Яндекса, и именно он связывает аккаунты. Ни логин, ни
+ * почта на эту роль не годятся: их меняют, а id закреплён навсегда.
+ */
+export interface YandexIdentity {
+  subject: string;
+  login: string;
+  email: string | null;
+  /** Имя, под которым человек появится в приложении. */
+  name: string;
+}
+
+/** Имя длиннее не бывает: столько же отведено игроку в ростере. */
+export const NAME_MAX = 40;
+
+export function identityFrom(info: YandexUserInfo): YandexIdentity {
+  const subject = String(info.id ?? '').trim();
+  if (!subject) throw new Error('yandex userinfo has no id');
+
+  const login = String(info.login ?? '').trim();
+
+  return {
+    subject,
+    login,
+    email: info.default_email?.trim() || info.emails?.[0]?.trim() || null,
+    name: accountName(info),
+  };
+}
+
+/**
+ * Имя аккаунта из профиля Яндекса.
+ *
+ * При нынешних правах приложения имени не приходит, и остаётся логин — под ним
+ * человек и появится в ростере, пока не переименует себя сам. Остальные ветки
+ * не мёртвые: они разбирают то, что Яндекс начнёт присылать, если права в
+ * кабинете расширят. Порядок в них — от того, как человек назвал себя сам, к
+ * тому, как его называет система.
+ *
+ * Пустым результат не бывает: имя видно в турнирной таблице, и «» там хуже
+ * любой замены.
+ */
+export function accountName(info: YandexUserInfo): string {
+  const candidates = [
+    info.display_name,
+    [info.first_name, info.last_name].filter(Boolean).join(' '),
+    info.real_name,
+    info.login,
+  ];
+
+  for (const candidate of candidates) {
+    const name = String(candidate ?? '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .slice(0, NAME_MAX)
+      .trim();
+    if (name) return name;
+  }
+
+  return 'Игрок';
+}
+
+/**
+ * Куда вернуть человека после входа.
+ *
+ * Адрес приходит из ссылки («войдите, чтобы принять приглашение»), поэтому
+ * пропускается только путь внутри приложения. `//` отсеивается отдельно: это
+ * ссылка на чужой хост, которую браузер понимает как внешнюю.
+ */
+export function safeNext(value: string | null | undefined, fallback = '/tournaments'): string {
+  if (!value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) {
+    return fallback;
+  }
+  return value;
+}
+
+/**
+ * Чем кончился поход к Яндексу. Одно слово в адресной строке — один текст на
+ * экране; коды не пересекаются, поэтому и экран входа, и профиль читают их
+ * одним и тем же способом.
+ */
+export const YANDEX_NOTICES = {
+  denied: 'Вход через Яндекс отменён.',
+  failed: 'Не удалось войти через Яндекс ID. Попробуйте ещё раз.',
+  expired: 'Вход через Яндекс занял слишком много времени. Попробуйте ещё раз.',
+  off: 'Вход через Яндекс ID сейчас недоступен.',
+  session: 'Пока вы были на Яндексе, вход в приложение истёк. Войдите и повторите привязку.',
+  linked: 'Яндекс ID привязан.',
+  taken: 'Этот Яндекс ID уже привязан к другому аккаунту.',
+  occupied: 'К аккаунту уже привязан другой Яндекс ID — сначала отвяжите его.',
+  unlinked: 'Яндекс ID отвязан.',
+} as const;
+
+export type YandexNotice = keyof typeof YANDEX_NOTICES;
+
+/** Текст по коду из адреса. Неизвестный код — не текст, а молчание. */
+export function yandexNotice(code: string | null | undefined): string | null {
+  if (!code) return null;
+  return YANDEX_NOTICES[code as YandexNotice] ?? null;
+}
