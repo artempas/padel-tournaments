@@ -55,7 +55,7 @@ export default function RosterView({
 }) {
   const router = useRouter();
   const { value: players, error, mutate } = useOptimisticState(initial);
-  const [sort, setSort] = useState<Sort>('points');
+  const [sort, setSort] = useState<Sort>('rating');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
