@@ -470,11 +470,32 @@ try {
   // тем самым, что уже играл в турнире выше. Дальше проверяется ровно то, что
   // отличает участника от администратора.
   const guest = await seedAccount(`${username}-guest`);
-  const guestApi = (path, init = {}) =>
-    fetch(`${BASE}${path}`, {
+
+  // Настоящий браузер запоминает Set-Cookie и шлёт его дальше сам — в
+  // частности padel_club, который сервер выставляет сразу после вступления
+  // по ссылке. Голый fetch этого не делает, и без явного кукиджара гость
+  // после присоединения к клубу иногда остаётся с «текущим клубом» по
+  // умолчанию — своим личным, — а не тем, в который только что вошёл: оба
+  // членства создаются в одну и ту же миллисекунду локального прогона, и
+  // тогда, чей вход раньше, решает случайный порядок uuid.
+  let guestCookie = guest.cookie;
+  const guestApi = async (path, init = {}) => {
+    const res = await fetch(`${BASE}${path}`, {
       ...init,
-      headers: { 'content-type': 'application/json', cookie: guest.cookie, ...(init.headers ?? {}) },
-    }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => ({})) }));
+      headers: { 'content-type': 'application/json', cookie: guestCookie, ...(init.headers ?? {}) },
+    });
+
+    for (const setCookie of res.headers.getSetCookie?.() ?? []) {
+      const [name, value] = setCookie.split(';')[0].split('=');
+      guestCookie = guestCookie
+        .split('; ')
+        .filter((c) => !c.startsWith(`${name}=`))
+        .concat(`${name}=${value}`)
+        .join('; ');
+    }
+
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
 
   // Отдельный, ещё не доигранный турнир: у завершённого участник счёт менять
   // не вправе, и на нём проверялось бы не то правило.
@@ -591,12 +612,13 @@ try {
   check('deleted tournament is gone', () => assert.equal(gone.status, 404));
 
   // Турниры сносим первыми: tournament_players держит people через RESTRICT,
-  // и при удалении клуба порядок каскадов не определён.
-  const clubs = [clubId, stranger.clubId];
+  // и при удалении клуба порядок каскадов не определён. guest.clubId включён
+  // в тот же список на случай, если гость всё-таки завёл там турнир, — см.
+  // комментарий про кукиджар выше.
+  const clubs = [clubId, stranger.clubId, guest.clubId];
   const accounts = [userId, stranger.id, guest.id];
   await client.query('DELETE FROM tournaments WHERE club_id = ANY($1)', [clubs]);
   await client.query('DELETE FROM clubs WHERE id = ANY($1)', [clubs]);
-  await client.query('DELETE FROM clubs WHERE id = $1', [guest.clubId]);
   await client.query('DELETE FROM users WHERE id = ANY($1)', [accounts]);
 } finally {
   await client.end();

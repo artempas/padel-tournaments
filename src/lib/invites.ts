@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { ApiError, parseUuid } from './api';
 import { normalizeKey } from './normalize';
 import { prisma } from './prisma';
@@ -11,16 +11,12 @@ import { prisma } from './prisma';
  * руками, и это осознанное решение админа, а не свойство ссылки, которую он
  * когда-то бросил в общий чат.
  *
- * В базе лежит только sha256 токена — как у сессий. Отсюда следствие для
- * экрана: значение ссылки показывается один раз, сразу после выпуска. Захотел
- * позвать ещё кого-то, а ссылку не сохранил — выпусти новую; это дешевле, чем
- * держать в базе рабочий ключ от клуба.
+ * Токен хранится в базе открытым текстом, а не хешем, как у сессий: ссылка
+ * должна быть видна на экране клуба с любого устройства и после
+ * перезагрузки. Цена этого решения мала — приглашение даёт роль участника и
+ * ничего больше.
  */
 const INVITE_TTL_DAYS = 7;
-
-function hashToken(token: string): Uint8Array<ArrayBuffer> {
-  return Uint8Array.from(createHash('sha256').update(token).digest());
-}
 
 export interface IssuedInvite {
   token: string;
@@ -41,22 +37,22 @@ export async function issueInvite(clubId: string, createdById: string): Promise<
     });
 
     await tx.clubInvite.create({
-      data: { clubId, tokenHash: hashToken(token), createdById, expiresAt },
+      data: { clubId, token, createdById, expiresAt },
     });
   });
 
   return { token, expiresAt: expiresAt.toISOString() };
 }
 
-/** Есть ли действующая ссылка и до какого числа. Само значение не вернуть. */
-export async function activeInvite(clubId: string): Promise<{ expiresAt: string } | null> {
+/** Действующая ссылка целиком — её можно показать снова на любом устройстве. */
+export async function activeInvite(clubId: string): Promise<IssuedInvite | null> {
   const invite = await prisma.clubInvite.findFirst({
     where: { clubId, revokedAt: null, expiresAt: { gt: new Date() } },
     orderBy: { createdAt: 'desc' },
-    select: { expiresAt: true },
+    select: { token: true, expiresAt: true },
   });
 
-  return invite ? { expiresAt: invite.expiresAt.toISOString() } : null;
+  return invite ? { token: invite.token, expiresAt: invite.expiresAt.toISOString() } : null;
 }
 
 export async function revokeInvites(clubId: string): Promise<void> {
@@ -76,7 +72,7 @@ export interface InvitePreview {
 
 async function findLive(token: string) {
   const invite = await prisma.clubInvite.findUnique({
-    where: { tokenHash: hashToken(token) },
+    where: { token },
     select: { clubId: true, revokedAt: true, expiresAt: true },
   });
 

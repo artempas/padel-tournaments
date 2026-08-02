@@ -15,7 +15,7 @@ async function requireInviter(id: string) {
   return membership;
 }
 
-/** Есть ли действующая ссылка. Само значение здесь не вернуть — в базе хеш. */
+/** Действующая ссылка целиком — токен хранится открытым текстом. */
 export const GET = route(async (_request: Request, context: Context) => {
   const { id } = await context.params;
   const { club } = await requireInviter(id);

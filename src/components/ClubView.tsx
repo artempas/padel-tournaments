@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ClubBadge from './ClubBadge';
@@ -8,6 +8,7 @@ import ThemeToggle from './ThemeToggle';
 import type { ClubBrief } from '@/lib/club-context';
 import { CLUB_COLORS, CLUB_ICONS, CLUB_NAME_MAX } from '@/lib/club-style';
 import type { ClubMemberRow } from '@/lib/clubs';
+import type { IssuedInvite } from '@/lib/invites';
 import {
   can,
   canAssignRole,
@@ -26,6 +27,46 @@ const dateFormat = new Intl.DateTimeFormat('ru-RU', {
   year: 'numeric',
 });
 
+/**
+ * quickchart.io сам ходит за centerImageUrl своим сервером, поэтому адрес
+ * должен быть виден снаружи. На localhost и в частных сетях разработки это
+ * не так — сервис не рисует ошибку текстом поверх кода, а вместо самого QR
+ * возвращает картинку с текстом «не смог загрузить». Логотип поэтому кладут,
+ * только когда он в принципе может его достать; сам QR при этом не портится.
+ */
+function isPubliclyReachable(hostname: string): boolean {
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return false;
+  // RFC 1918 — частные сети, в которых обычно и живёт дев-сервер за роутером.
+  return !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(hostname);
+}
+
+/**
+ * Картинка QR — сторонний сервис quickchart.io, не наш код: значение ссылки
+ * уходит к нему в открытом виде параметром `text`. Приемлемо здесь по той же
+ * причине, по которой токен вообще хранится открытым текстом: приглашение
+ * даёт роль обычного участника и ничего больше.
+ *
+ * `dark`/`light`/`size` подобраны под приложение; `dotStyle`, `finderStyle` и
+ * `finderDotStyle` — фиксированный стиль скругления, менять не нужно.
+ */
+function quickChartQrUrl(link: string, origin: string): string {
+  const params = new URLSearchParams({
+    text: link,
+    light: 'ffffff',
+    dark: '2563eb',
+    size: '600',
+    dotStyle: 'dot',
+    finderStyle: 'rounded',
+    finderDotStyle: 'rounded',
+  });
+
+  if (isPubliclyReachable(new URL(origin).hostname)) {
+    params.set('centerImageUrl', `${origin}/icon-192.png`);
+  }
+
+  return `https://quickchart.io/qr?${params.toString()}`;
+}
+
 export interface ClubViewProps {
   club: ClubBrief;
   role: ClubRole;
@@ -34,8 +75,8 @@ export interface ClubViewProps {
   members: ClubMemberRow[];
   /** Весь ростер клуба, включая тех, за кем никто не стоит. */
   players: Array<RosterPlayer & { linked: boolean }>;
-  /** Действующая ссылка есть — но её значение известно только в момент выпуска. */
-  inviteExpiresAt: string | null;
+  /** Действующая ссылка целиком — токен хранится открытым текстом. */
+  invite: IssuedInvite | null;
 }
 
 export default function ClubView({
@@ -44,14 +85,14 @@ export default function ClubView({
   meUserId,
   members,
   players,
-  inviteExpiresAt,
+  invite,
 }: ClubViewProps) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('players');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [qrFailed, setQrFailed] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [transferTo, setTransferTo] = useState<string | null>(null);
@@ -59,6 +100,37 @@ export default function ClubView({
   const [name, setName] = useState(club.name);
   const [icon, setIcon] = useState(club.icon);
   const [color, setColor] = useState(club.color);
+
+  // Домен нужен, чтобы собрать абсолютную ссылку и адрес логотипа для
+  // quickchart. Эффект, а не ленивая инициализация useState: window
+  // недоступен при серверном рендере, и читать его нужно уже после
+  // гидратации, иначе разметка разойдётся с тем, что прислал сервер.
+  const [origin, setOrigin] = useState<string | null>(null);
+  useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
+
+  // Ссылка приходит с сервера при каждом заходе на страницу — токен теперь
+  // хранится открытым текстом именно затем, чтобы её было видно с любого
+  // устройства, а не только там, где её выпустили.
+  const link = invite && origin ? `${origin}/join/${invite.token}` : null;
+  const qrSrc = link && origin ? quickChartQrUrl(link, origin) : null;
+
+  // Смена ссылки — новая выпущена, отозвана или это другой клуб — снимает
+  // отметку об ошибке загрузки предыдущей картинки.
+  useEffect(() => {
+    setQrFailed(false);
+  }, [qrSrc]);
+
+  async function copyLink() {
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+    } catch {
+      setError('Не удалось скопировать — выделите и скопируйте ссылку вручную');
+    }
+  }
 
   async function act(
     run: () => Promise<unknown>,
@@ -85,18 +157,18 @@ export default function ClubView({
     setError(null);
     setCopied(false);
     try {
-      const { invite } = await request<{ invite: { token: string } }>(
+      const { invite: issued } = await request<{ invite: IssuedInvite }>(
         `/api/clubs/${club.id}/invite`,
         { method: 'POST' },
       );
-      const url = `${window.location.origin}/join/${invite.token}`;
-      setLink(url);
       // Буфер обмена может быть закрыт разрешениями — тогда ссылка просто
-      // остаётся на экране, и её выделяют руками.
-      await navigator.clipboard?.writeText(url).then(
-        () => setCopied(true),
-        () => {},
-      );
+      // остаётся на экране, и её выделяют руками или кнопкой ниже.
+      if (origin) {
+        await navigator.clipboard?.writeText(`${origin}/join/${issued.token}`).then(
+          () => setCopied(true),
+          () => {},
+        );
+      }
       router.refresh();
     } catch (err) {
       setError(failureMessage(err, 'Не удалось выпустить ссылку'));
@@ -262,19 +334,44 @@ export default function ClubView({
             <div className="card mb-4 p-4">
               <h2 className="font-semibold">Пригласить в клуб</h2>
               <p className="mt-1 text-sm text-muted">
-                {inviteExpiresAt
+                {invite
                   ? // Точки в конце нет: русский формат Intl уже кончается на «г.»
-                    `Ссылка действует до ${dateFormat.format(new Date(inviteExpiresAt))}`
+                    `Ссылка действует до ${dateFormat.format(new Date(invite.expiresAt))}`
                   : 'Действующей ссылки нет.'}{' '}
                 По ней можно вступить сколько угодно раз, всегда участником.
               </p>
 
               {link && (
-                <div className="mt-3 rounded-xl border border-accent/40 bg-accent/10 p-3">
-                  <p className="mb-1 text-xs font-semibold text-accent">
-                    {copied ? 'Ссылка скопирована' : 'Скопируйте ссылку — второй раз её не показать'}
-                  </p>
-                  <p className="break-all font-mono text-xs">{link}</p>
+                <div className="mt-3 flex flex-col gap-3">
+                  <div className="rounded-xl border border-accent/40 bg-accent/10 p-3">
+                    <p className="mb-1 text-xs font-semibold text-accent">
+                      {copied ? 'Ссылка скопирована' : 'Ссылка видна на любом устройстве, пока действует'}
+                    </p>
+                    <p className="break-all font-mono text-xs">{link}</p>
+                    <button
+                      type="button"
+                      onClick={copyLink}
+                      className="tap mt-2 w-full rounded-lg border border-accent/50 px-3 text-xs font-semibold text-accent sm:w-auto"
+                    >
+                      {copied ? 'Скопировано ✓' : 'Скопировать ссылку'}
+                    </button>
+                  </div>
+
+                  {qrSrc && !qrFailed && (
+                    <img
+                      src={qrSrc}
+                      alt="QR-код ссылки-приглашения"
+                      width={600}
+                      height={600}
+                      className="w-full rounded-xl border border-line"
+                      onError={() => setQrFailed(true)}
+                    />
+                  )}
+                  {qrFailed && (
+                    <p className="text-xs text-muted">
+                      Не удалось загрузить QR-код — воспользуйтесь ссылкой выше.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -285,19 +382,18 @@ export default function ClubView({
                   onClick={issueLink}
                   className="tap rounded-xl bg-accent px-4 text-sm font-bold text-accent-ink disabled:opacity-40"
                 >
-                  {inviteExpiresAt ? 'Выпустить новую' : 'Выпустить ссылку'}
+                  {invite ? 'Выпустить новую' : 'Выпустить ссылку'}
                 </button>
-                {inviteExpiresAt && (
+                {invite && (
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => {
-                      setLink(null);
-                      void act(
+                    onClick={() =>
+                      act(
                         () => request(`/api/clubs/${club.id}/invite`, { method: 'DELETE' }),
                         'Не удалось отозвать ссылку',
-                      );
-                    }}
+                      )
+                    }
                     className="tap rounded-xl border border-line px-4 text-sm font-medium text-muted disabled:opacity-40"
                   >
                     Отозвать
@@ -305,11 +401,7 @@ export default function ClubView({
                 )}
               </div>
 
-              {/* Ссылку хранит только тот, кому её выдали: в базе лежит хеш —
-                  как у сессий. Поэтому «показать ещё раз» здесь нет. */}
-              <p className="mt-2 text-xs text-muted">
-                Выпуск новой ссылки гасит прежнюю.
-              </p>
+              <p className="mt-2 text-xs text-muted">Выпуск новой ссылки гасит прежнюю.</p>
             </div>
           )}
 

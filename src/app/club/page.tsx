@@ -25,7 +25,7 @@ export default async function ClubPage() {
       meUserId={user.id}
       members={members}
       players={players}
-      inviteExpiresAt={invite?.expiresAt ?? null}
+      invite={invite}
     />
   );
 }
