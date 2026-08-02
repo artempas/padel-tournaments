@@ -656,12 +656,13 @@ try {
   check('deleted tournament is gone', () => assert.equal(gone.status, 404));
 
   // Турниры сносим первыми: tournament_players держит people через RESTRICT,
-  // и при удалении клуба порядок каскадов не определён.
-  const clubs = [clubId, stranger.clubId];
+  // и при удалении клуба порядок каскадов не определён. guest.clubId включён
+  // в тот же список на случай, если гость всё-таки завёл там турнир, — см.
+  // комментарий про кукиджар выше.
+  const clubs = [clubId, stranger.clubId, guest.clubId];
   const accounts = [userId, stranger.id, guest.id];
   await client.query('DELETE FROM tournaments WHERE club_id = ANY($1)', [clubs]);
   await client.query('DELETE FROM clubs WHERE id = ANY($1)', [clubs]);
-  await client.query('DELETE FROM clubs WHERE id = $1', [guest.clubId]);
   await client.query('DELETE FROM users WHERE id = ANY($1)', [accounts]);
 } finally {
   await client.end();

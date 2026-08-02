@@ -268,7 +268,12 @@ model ClubInvite {
   id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   clubId String @map("club_id") @db.Uuid
 
-  tokenHash Bytes @unique @map("token_hash")
+  // Открытым текстом, а не хешем, как у сессий: ссылка должна быть видна на
+  // экране клуба с любого устройства и после перезагрузки, а не только там,
+  // где её выпустили. Цена этого решения мала — приглашение даёт роль
+  // участника и ничего больше, — а хеш её бы этого не позволил в принципе:
+  // из хеша исходное значение не достать.
+  token String @unique @db.Text
 
   // Кто выпустил. Аккаунт может исчезнуть, ссылка от этого не портится.
   createdById String? @map("created_by_id") @db.Uuid
