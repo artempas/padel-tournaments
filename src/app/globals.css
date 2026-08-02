@@ -33,6 +33,12 @@
   --color-club-rose: #ff8fa3;
   --color-club-teal: #5fd3c4;
 
+  /* Кнопка Яндекс ID. Цвета не наши и палитре приложения не подчиняются: их
+     задаёт фирменный стиль. Пара «фон/текст» устроена как accent/accent-ink,
+     но зеркально теме страницы — на тёмной кнопка белая, на светлой чёрная. */
+  --color-yandex: #ffffff;
+  --color-yandex-ink: #000000;
+
   --radius-card: 1rem;
 }
 
@@ -65,6 +71,9 @@
     --color-club-amber: #e08a1e;
     --color-club-rose: #e0647d;
     --color-club-teal: #2fae9d;
+
+    --color-yandex: #000000;
+    --color-yandex-ink: #ffffff;
   }
 
   html {
@@ -113,4 +122,36 @@
   background: var(--color-surface);
   border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
+}
+
+/**
+ * Кнопка входа через Яндекс ID.
+ *
+ * Размеры, шрифт и цвета сняты с конструктора кнопок Яндекса
+ * (autofill.yandex.ru/suggest/button/constructor), вид «main», размер «m»:
+ * высота 44px, отступы 12px, 16px до надписи, текст 14px/16px начертанием 500.
+ * Утилитой, а не набором классов у элемента, именно поэтому — это чужой
+ * фирменный стиль, и менять его по вкусу нельзя, а держать в одном месте нужно.
+ *
+ * Единственное, что конструктор оставляет на усмотрение сайта, — скругление;
+ * взято наше, как у остальных кнопок. Шрифт YS Text ставить неоткуда, поэтому
+ * цепочка запасных та же, что у самого Яндекса.
+ */
+@utility yandex-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  width: 100%;
+  min-width: 170px;
+  height: 2.75rem;
+  padding: 0 12px;
+  border-radius: 0.75rem;
+  background: var(--color-yandex);
+  color: var(--color-yandex-ink);
+  font-family: 'YS Text', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 16px;
+  transition: opacity 0.3s;
 }
