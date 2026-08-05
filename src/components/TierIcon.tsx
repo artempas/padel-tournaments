@@ -1,6 +1,31 @@
 import type { TierId } from '@/lib/rating';
 
 /**
+ * Плашка ступени. Классы записаны целиком, а не собраны из id: Tailwind ищет
+ * имена классов по исходнику текстом, и `bg-${id}` он не увидит.
+ */
+export const TIER_STYLE: Record<TierId, string> = {
+  // Калибровка нарочно без заливки: пустая плашка читается как «ступени ещё
+  // нет», а не как самая нижняя из них. С серебром её иначе путают — оно тоже
+  // серое.
+  calibration: 'text-muted ring-1 ring-inset ring-line',
+  bronze: 'bg-bronze/20 text-bronze ring-1 ring-inset ring-bronze/40',
+  silver: 'bg-silver/20 text-silver ring-1 ring-inset ring-silver/40',
+  gold: 'bg-gold/20 text-gold ring-1 ring-inset ring-gold/40',
+  platinum: 'bg-platinum/20 text-platinum ring-1 ring-inset ring-platinum/40',
+  diamond: 'bg-diamond/20 text-diamond ring-1 ring-inset ring-diamond/40',
+};
+
+/**
+ * Цвет ступени для SVG — там классов Tailwind нет, только `stroke`/`fill`.
+ * У калибровки собственного цвета нет: пока ступень не определилась, красить
+ * линию не во что.
+ */
+export function tierColor(id: TierId): string {
+  return id === 'calibration' ? 'var(--color-muted)' : `var(--color-${id})`;
+}
+
+/**
  * Значки ступеней.
  *
  * Живут спрайтом, а не пятью отдельными файлами в `public`, по двум причинам.

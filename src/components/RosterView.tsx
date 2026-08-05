@@ -3,31 +3,43 @@
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import RatingSparkline from './RatingSparkline';
 import ThemeToggle from './ThemeToggle';
 import { useOptimisticState } from '@/lib/optimistic';
-import { TierIcon, TierSprite } from './TierIcon';
+import { TierIcon, TierSprite, TIER_STYLE, tierColor } from './TierIcon';
 import { plural } from '@/lib/plural';
-import { CALIBRATION_MATCHES, RATING_TIERS, tierOf, type TierId } from '@/lib/rating';
+import { CALIBRATION_MATCHES, RATING_TIERS, tierOf } from '@/lib/rating';
 import { request } from '@/lib/request';
 import type { RosterStat } from '@/lib/roster';
 
-/**
- * Классы ступеней записаны целиком, а не собраны из id: Tailwind ищет имена
- * классов по исходнику текстом, и `bg-${id}` он не увидит.
- */
-const TIER_STYLE: Record<TierId, string> = {
-  // Калибровка нарочно без заливки: пустая плашка читается как «ступени ещё
-  // нет», а не как самая нижняя из них. С серебром её иначе путают — оно тоже
-  // серое.
-  calibration: 'text-muted ring-1 ring-inset ring-line',
-  bronze: 'bg-bronze/20 text-bronze ring-1 ring-inset ring-bronze/40',
-  silver: 'bg-silver/20 text-silver ring-1 ring-inset ring-silver/40',
-  gold: 'bg-gold/20 text-gold ring-1 ring-inset ring-gold/40',
-  platinum: 'bg-platinum/20 text-platinum ring-1 ring-inset ring-platinum/40',
-  diamond: 'bg-diamond/20 text-diamond ring-1 ring-inset ring-diamond/40',
-};
-
 type Sort = 'points' | 'rating' | 'matches' | 'name';
+
+/**
+ * За сколько последних турниров показывается изменение рейтинга.
+ *
+ * Три, а не один: за один турнир рейтинг гуляет и от жребия, а три подряд —
+ * это уже про игру. И не десять: тогда «недавно» перестаёт быть недавним.
+ */
+const TREND_SPAN = 3;
+
+/**
+ * Насколько рейтинг сдвинулся за последние турниры и по скольким он считался:
+ * у того, кто сыграл всего два, «за 3 турнира» было бы неправдой.
+ */
+function recentMove(trend: number[]): { delta: number; over: number } | null {
+  // Первое число в `trend` — стартовый рейтинг, а не турнир.
+  const played = trend.length - 1;
+  if (played < 1) return null;
+
+  const over = Math.min(TREND_SPAN, played);
+  return { delta: trend[trend.length - 1] - trend[trend.length - 1 - over], over };
+}
+
+/** Ближайшая ступень сверху и сколько до неё осталось. */
+function nextTier(rating: number): { label: string; gap: number } | null {
+  const above = [...RATING_TIERS].reverse().find((t) => t.floor !== null && t.floor > rating);
+  return above?.floor ? { label: above.label, gap: above.floor - rating } : null;
+}
 
 // Dative case, so each option reads on from the "Сортировать по" label.
 const SORTS: Array<[Sort, string]> = [
@@ -181,6 +193,8 @@ export default function RosterView({
               {sorted.map((person, index) => {
                 const open = expandedId === person.id;
                 const tier = tierOf(person.rating, person.matches);
+                const move = open ? recentMove(person.trend) : null;
+                const upcoming = open ? nextTier(person.rating) : null;
                 return (
                   <li key={person.id}>
                     <button
@@ -215,26 +229,44 @@ export default function RosterView({
 
                     {open && (
                       <div className="bg-ink px-3 pb-4 pt-1">
-                        <p className="mb-3 flex items-center gap-2 text-sm">
+                        {/* Одной строкой: где игрок сейчас, куда движется и
+                            сколько осталось до следующей ступени. */}
+                        <p className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                           <span
-                            className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-bold ${TIER_STYLE[tier.id]}`}
+                            className={`flex items-center gap-1.5 rounded-md px-2 py-1 font-bold ${TIER_STYLE[tier.id]}`}
                           >
                             <TierIcon id={tier.id} className="h-5 w-5" />
                             {tier.label}
                           </span>
-                          {tier.id === 'calibration' && (
-                            <span className="text-xs text-muted">
-                              ещё {CALIBRATION_MATCHES - person.matches}{' '}
-                              {plural(
-                                CALIBRATION_MATCHES - person.matches,
-                                'матч',
-                                'матча',
-                                'матчей',
-                              )}{' '}
-                              — и ступень определится
+                          {move && move.delta !== 0 && (
+                            <span
+                              className={`font-semibold tabular-nums ${move.delta > 0 ? 'text-accent' : 'text-muted'}`}
+                            >
+                              {move.delta > 0 ? `+${move.delta}` : move.delta} за {move.over}{' '}
+                              {plural(move.over, 'турнир', 'турнира', 'турниров')}
                             </span>
                           )}
+                          <span className="ml-auto text-muted">
+                            {tier.id === 'calibration'
+                              ? `ещё ${CALIBRATION_MATCHES - person.matches} ${plural(
+                                  CALIBRATION_MATCHES - person.matches,
+                                  'матч',
+                                  'матча',
+                                  'матчей',
+                                )} до ступени`
+                              : upcoming
+                                ? `до ступени «${upcoming.label}» — ${upcoming.gap}`
+                                : 'выше некуда'}
+                          </span>
                         </p>
+
+                        {person.trend.length > 1 && (
+                          <RatingSparkline
+                            values={person.trend}
+                            color={tierColor(tier.id)}
+                            className="mb-3 h-11 w-full"
+                          />
+                        )}
 
                         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
                           <div>
@@ -273,6 +305,16 @@ export default function RosterView({
                             Последний матч — {dateFormat.format(new Date(person.lastPlayedAt))}
                           </p>
                         )}
+
+                        <Link
+                          href={`/players/${person.id}`}
+                          className="tap mt-3 flex items-center justify-between rounded-xl border border-line px-4 text-sm font-medium"
+                        >
+                          Профиль игрока
+                          <span aria-hidden="true" className="text-muted">
+                            →
+                          </span>
+                        </Link>
 
                         {!mayArchive ? null : pendingDelete === person.id ? (
                           <div className="mt-3 flex gap-2">

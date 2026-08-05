@@ -1,7 +1,14 @@
 import { ApiError, parseUuid } from './api';
 import { normalizeKey } from './normalize';
 import { prisma } from './prisma';
-import { computeRatings, START_RATING, type RatedMatch, type Rating } from './rating';
+import {
+  computeRatings,
+  ratingHistory,
+  START_RATING,
+  type PlayedMatch,
+  type Rating,
+  type RatingPoint,
+} from './rating';
 import type { Prisma } from '@/generated/prisma/client';
 
 export interface RosterPlayer {
@@ -20,6 +27,13 @@ export interface RosterStat extends RosterPlayer {
   lastPlayedAt: string | null;
   /** Клубный рейтинг, округлённый: см. lib/rating.ts. */
   rating: number;
+  /**
+   * Рейтинг после каждого сыгранного турнира, начиная со стартового. Хватает
+   * на спарклайн в строке списка; за подробностями — `playerProfile`.
+   *
+   * Пустой у того, кто ещё не играл: рисовать линию из одной точки нечем.
+   */
+  trend: number[];
   /**
    * За игроком стоит аккаунт: кто-то из участников клуба назвал себя им.
    * Остальные анонимны — это состояние по умолчанию.
@@ -90,6 +104,9 @@ interface HistoryRow {
   side: 'a' | 'b';
   score_a: number;
   score_b: number;
+  tournament_id: string;
+  tournament_name: string;
+  tournament_at: Date;
 }
 
 /** Границы истории: всё, что сыграно строго раньше этого турнира. */
@@ -110,12 +127,14 @@ export interface HistoryCutoff {
  * миллисекунду: порядок должен быть определён всегда, иначе один и тот же
  * ростер давал бы разные числа от запроса к запросу.
  */
-async function ratedHistory(clubId: string, before?: HistoryCutoff): Promise<RatedMatch[]> {
+async function ratedHistory(clubId: string, before?: HistoryCutoff): Promise<PlayedMatch[]> {
   const cutoffAt = before?.createdAt ?? null;
   const cutoffId = before?.id ?? null;
 
   const rows = await prisma.$queryRaw<HistoryRow[]>`
-    SELECT mp.match_id, tp.person_id, mp.side, m.score_a, m.score_b
+    SELECT mp.match_id, tp.person_id, mp.side, m.score_a, m.score_b,
+           t.id AS tournament_id, t.name AS tournament_name,
+           t.created_at AS tournament_at
       FROM matches m
       JOIN tournaments t ON t.id = m.tournament_id
       JOIN match_participants mp ON mp.match_id = m.id
@@ -135,19 +154,33 @@ async function ratedHistory(clubId: string, before?: HistoryCutoff): Promise<Rat
  * их встретил запрос: Map помнит порядок вставки, и сортировка доезжает сюда
  * нетронутой.
  */
-function toMatches(rows: HistoryRow[]): RatedMatch[] {
+function toMatches(rows: HistoryRow[]): PlayedMatch[] {
   interface Open {
     a: string[];
     b: string[];
     scoreA: number;
     scoreB: number;
+    tournamentId: string;
+    tournamentName: string;
+    at: string;
   }
   const byMatch = new Map<string, Open>();
 
   for (const row of rows) {
     let open = byMatch.get(row.match_id);
     if (!open) {
-      byMatch.set(row.match_id, (open = { a: [], b: [], scoreA: row.score_a, scoreB: row.score_b }));
+      byMatch.set(
+        row.match_id,
+        (open = {
+          a: [],
+          b: [],
+          scoreA: row.score_a,
+          scoreB: row.score_b,
+          tournamentId: row.tournament_id,
+          tournamentName: row.tournament_name,
+          at: row.tournament_at.toISOString(),
+        }),
+      );
     }
     (row.side === 'a' ? open.a : open.b).push(row.person_id);
   }
@@ -157,11 +190,14 @@ function toMatches(rows: HistoryRow[]): RatedMatch[] {
       // «В матче ровно четверо» держит отложенный триггер в базе, так что
       // неполной четвёрке взяться неоткуда; проверка стоит ради типа пары.
       .filter((m) => m.a.length === 2 && m.b.length === 2)
-      .map((m): RatedMatch => ({
+      .map((m): PlayedMatch => ({
         teamA: [m.a[0], m.a[1]],
         teamB: [m.b[0], m.b[1]],
         scoreA: m.scoreA,
         scoreB: m.scoreB,
+        tournamentId: m.tournamentId,
+        tournamentName: m.tournamentName,
+        at: m.at,
       }))
   );
 }
@@ -180,6 +216,11 @@ export async function ratingsForClub(
   before?: HistoryCutoff,
 ): Promise<Map<string, Rating>> {
   return computeRatings(await ratedHistory(clubId, before));
+}
+
+/** История рейтинга каждого игрока клуба; разбор — в `ratingHistory`. */
+export async function ratingHistories(clubId: string): Promise<Map<string, RatingPoint[]>> {
+  return ratingHistory(await ratedHistory(clubId));
 }
 
 interface CareerRow {
@@ -202,10 +243,12 @@ interface CareerRow {
  * на какой стороне матча он стоял, а такой CASE в языке запросов Prisma не
  * выражается. Зато обход идёт по индексам — в v1 здесь был полный скан matches.
  */
-export async function rosterStats(clubId: string): Promise<RosterStat[]> {
+async function rosterWithHistories(
+  clubId: string,
+): Promise<{ stats: RosterStat[]; histories: Map<string, RatingPoint[]> }> {
   // Суммы берёт вью, рейтинг — проход по истории: агрегат его не выражает,
   // потому что каждый матч считается от рейтингов, сложившихся к нему.
-  const [rows, ratings] = await Promise.all([
+  const [rows, histories] = await Promise.all([
     prisma.$queryRaw<CareerRow[]>`
       SELECT person_id AS id, name, points_for, points_against, diff,
              matches, wins, tournaments, last_played_at,
@@ -215,23 +258,82 @@ export async function rosterStats(clubId: string): Promise<RosterStat[]> {
          AND archived_at IS NULL
        ORDER BY points_for DESC, lower(name)
     `,
-    ratingsForClub(clubId),
+    ratingHistories(clubId),
   ]);
 
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    pointsFor: Number(r.points_for),
-    pointsAgainst: Number(r.points_against),
-    diff: Number(r.diff),
-    matches: Number(r.matches),
-    wins: Number(r.wins),
-    tournaments: Number(r.tournaments),
-    lastPlayedAt: r.last_played_at?.toISOString() ?? null,
-    // Кто ещё не играл, стоит на старте — показать пустоту здесь не лучше.
-    rating: Math.round(ratings.get(r.id)?.rating ?? START_RATING),
-    linked: r.linked,
-  }));
+  const stats = rows.map((r): RosterStat => {
+    const points = histories.get(r.id) ?? [];
+    return {
+      id: r.id,
+      name: r.name,
+      pointsFor: Number(r.points_for),
+      pointsAgainst: Number(r.points_against),
+      diff: Number(r.diff),
+      matches: Number(r.matches),
+      wins: Number(r.wins),
+      tournaments: Number(r.tournaments),
+      lastPlayedAt: r.last_played_at?.toISOString() ?? null,
+      // Кто ещё не играл, стоит на старте — показать пустоту здесь не лучше.
+      rating: points[points.length - 1]?.rating ?? START_RATING,
+      // Старт в начале линии не украшение: без него первый турнир нарисовался
+      // бы точкой без движения, хотя рейтинг в нём как раз и сдвинулся.
+      trend: points.length > 0 ? [START_RATING, ...points.map((p) => p.rating)] : [],
+      linked: r.linked,
+    };
+  });
+
+  return { stats, histories };
+}
+
+export async function rosterStats(clubId: string): Promise<RosterStat[]> {
+  return (await rosterWithHistories(clubId)).stats;
+}
+
+export interface PlayerProfile {
+  player: RosterStat;
+  /** Место по рейтингу и сколько всего игроков в клубе. */
+  rank: number;
+  total: number;
+  /** Самый высокий рейтинг за всю историю: текущий бывает и ниже. */
+  peak: number;
+  history: RatingPoint[];
+  /**
+   * Имена всех, кто встречается в истории. Партнёр из третьего турнира мог с
+   * тех пор уйти из ростера, поэтому берутся и заархивированные.
+   */
+  names: Record<string, string>;
+}
+
+/**
+ * Всё, что знает клуб об одном игроке: карьера, место, история рейтинга.
+ *
+ * Считается по клубу целиком, а не по одному человеку, и иначе не выйдет:
+ * рейтинг каждого зависит от того, с кем и против кого он играл, — то есть от
+ * всей истории. Зато это ровно та же работа, что делает список, и разойтись
+ * страницам нечем.
+ */
+export async function playerProfile(clubId: string, id: string): Promise<PlayerProfile | null> {
+  const personId = parseUuid(id, 'Игрок не найден');
+
+  const [{ stats, histories }, people] = await Promise.all([
+    rosterWithHistories(clubId),
+    prisma.person.findMany({ where: { clubId }, select: { id: true, name: true } }),
+  ]);
+
+  const player = stats.find((p) => p.id === personId);
+  if (!player) return null;
+
+  const byRating = [...stats].sort((a, b) => b.rating - a.rating || b.matches - a.matches);
+  const history = histories.get(personId) ?? [];
+
+  return {
+    player,
+    rank: byRating.findIndex((p) => p.id === personId) + 1,
+    total: stats.length,
+    peak: history.reduce((top, point) => Math.max(top, point.rating), START_RATING),
+    history,
+    names: Object.fromEntries(people.map((p) => [p.id, p.name])),
+  };
 }
 
 /**

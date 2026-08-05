@@ -220,6 +220,99 @@ export function matchRatings(
   return [...replay(matches, seed(initial))];
 }
 
+/** Матч с пометкой турнира, в котором его сыграли. */
+export interface PlayedMatch extends RatedMatch {
+  tournamentId: string;
+  tournamentName: string;
+  /** ISO-дата турнира — та же ось, по которой упорядочена вся история. */
+  at: string;
+}
+
+/** Матч глазами одного его участника. */
+export interface RatingMatch {
+  /** Каким стал рейтинг после этого матча. */
+  rating: number;
+  delta: number;
+  scoreFor: number;
+  scoreAgainst: number;
+  partnerId: string;
+  opponentIds: [string, string];
+}
+
+/** Турнир в истории игрока: рейтинг на его конец и матчи, из которых он сложился. */
+export interface RatingPoint {
+  tournamentId: string;
+  tournamentName: string;
+  at: string;
+  rating: number;
+  delta: number;
+  matches: RatingMatch[];
+}
+
+/**
+ * История рейтинга каждого игрока: точка на турнир, внутри неё — матчи.
+ *
+ * Тот же прогон, что и `computeRatings`, только снимки не выбрасываются, а
+ * раскладываются по людям. Поэтому график не может разойтись с числом в списке:
+ * последняя точка — это оно и есть.
+ *
+ * Точка на турнир, а не на матч: внутри вечера рейтинг пляшет по десятку раз, и
+ * на ширине телефона это шум. Матчи никуда не деваются — они внутри точки.
+ *
+ * Дельта турнира — сумма дельт его матчей, и складывается она ровно в разницу
+ * показанных рейтингов: каждая считается по округлённым числам (см. `snapshot`),
+ * поэтому промежуточные значения в сумме сокращаются.
+ */
+export function ratingHistory(matches: readonly PlayedMatch[]): Map<string, RatingPoint[]> {
+  const byPerson = new Map<string, RatingPoint[]>();
+  const snapshots = matchRatings(matches);
+
+  matches.forEach((match, index) => {
+    const snapshot = snapshots[index];
+    // null стоит там, где рейтингу считать нечего (0:0).
+    if (!snapshot) return;
+
+    const sides = [
+      { team: snapshot.teamA, foes: match.teamB, got: match.scoreA, lost: match.scoreB },
+      { team: snapshot.teamB, foes: match.teamA, got: match.scoreB, lost: match.scoreA },
+    ];
+
+    for (const side of sides) {
+      side.team.players.forEach((player, slot) => {
+        let points = byPerson.get(player.id);
+        if (!points) byPerson.set(player.id, (points = []));
+
+        let point = points[points.length - 1];
+        if (!point || point.tournamentId !== match.tournamentId) {
+          points.push(
+            (point = {
+              tournamentId: match.tournamentId,
+              tournamentName: match.tournamentName,
+              at: match.at,
+              rating: player.rating,
+              delta: 0,
+              matches: [],
+            }),
+          );
+        }
+
+        point.matches.push({
+          rating: player.rating,
+          delta: player.delta,
+          scoreFor: side.got,
+          scoreAgainst: side.lost,
+          partnerId: side.team.players[1 - slot].id,
+          opponentIds: [side.foes[0], side.foes[1]],
+        });
+        point.rating = player.rating;
+        point.delta += player.delta;
+      });
+    }
+  });
+
+  return byPerson;
+}
+
 export type TierId = 'calibration' | 'bronze' | 'silver' | 'gold' | 'platinum' | 'diamond';
 
 export interface Tier {

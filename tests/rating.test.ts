@@ -5,9 +5,11 @@ import {
   computeRatings,
   matchRatings,
   RATING_TIERS,
+  ratingHistory,
   START_RATING,
   tierOf,
   type MatchRating,
+  type PlayedMatch,
   type Rating,
   type RatedMatch,
 } from '../src/lib/rating.ts';
@@ -235,6 +237,98 @@ test('у матча без счёта снимка нет, но место в о
   assert.notEqual(shots[1], null);
   // Несыгранный матч не должен был завести игрокам ни рейтинга, ни опыта.
   assert.equal(shots[1]!.teamA.players[0].rating - shots[1]!.teamA.players[0].delta, START_RATING);
+});
+
+// ---- История по турнирам ---------------------------------------------------
+
+function played(tournamentId: string, over: Partial<RatedMatch>): PlayedMatch {
+  return {
+    ...match(over),
+    tournamentId,
+    tournamentName: `Турнир ${tournamentId}`,
+    at: `2026-0${tournamentId}-01T18:00:00.000Z`,
+  };
+}
+
+test('история режется на турниры, а матчи остаются внутри точек', () => {
+  const history = ratingHistory([
+    played('1', { scoreA: 12, scoreB: 4 }),
+    played('1', { teamA: ['a', 'c'], teamB: ['b', 'd'], scoreA: 6, scoreB: 10 }),
+    played('2', { scoreA: 4, scoreB: 12 }),
+  ]);
+
+  const points = history.get('a')!;
+  assert.equal(points.length, 2);
+  assert.deepEqual(
+    points.map((p) => p.tournamentId),
+    ['1', '2'],
+  );
+  assert.equal(points[0].matches.length, 2);
+  assert.equal(points[1].matches.length, 1);
+  assert.equal(points[0].at, '2026-01-01T18:00:00.000Z');
+});
+
+test('точка турнира — рейтинг на его конец, а дельта складывается из матчей', () => {
+  const points = ratingHistory([
+    played('1', { scoreA: 12, scoreB: 4 }),
+    played('1', { teamA: ['a', 'c'], teamB: ['b', 'd'], scoreA: 14, scoreB: 2 }),
+  ]).get('a')!;
+
+  const point = points[0];
+  assert.equal(point.rating, point.matches[point.matches.length - 1].rating);
+  assert.equal(
+    point.delta,
+    point.matches.reduce((sum, m) => sum + m.delta, 0),
+  );
+  // Дельта турнира — это в точности путь от старта до его конца.
+  assert.equal(point.rating - point.delta, START_RATING);
+});
+
+test('последняя точка истории совпадает с итоговым рейтингом', () => {
+  const matches = [
+    played('1', { scoreA: 13, scoreB: 3 }),
+    played('1', { teamA: ['a', 'c'], teamB: ['b', 'd'], scoreA: 6, scoreB: 10 }),
+    played('2', { teamA: ['a', 'd'], teamB: ['b', 'c'], scoreA: 9, scoreB: 7 }),
+  ];
+
+  const history = ratingHistory(matches);
+  const table = computeRatings(matches);
+
+  for (const [id, points] of history) {
+    assert.equal(points[points.length - 1].rating, Math.round(table.get(id)!.rating));
+  }
+});
+
+test('в матче видно, с кем и против кого играли — с точки зрения каждого', () => {
+  const points = ratingHistory([
+    played('1', { teamA: ['аня', 'боря'], teamB: ['вера', 'гена'], scoreA: 12, scoreB: 4 }),
+  ]);
+
+  const mine = points.get('аня')![0].matches[0];
+  assert.equal(mine.partnerId, 'боря');
+  assert.deepEqual(mine.opponentIds, ['вера', 'гена']);
+  assert.equal(mine.scoreFor, 12);
+  assert.equal(mine.scoreAgainst, 4);
+
+  // У соперника тот же матч зеркален: счёт наоборот, рейтинг в другую сторону.
+  // Ровно противоположным числом дельта быть не обязана — она считается по
+  // округлённым рейтингам, а 104.5 и 95.5 округляются в одну сторону.
+  const theirs = points.get('вера')![0].matches[0];
+  assert.equal(theirs.scoreFor, 4);
+  assert.equal(theirs.scoreAgainst, 12);
+  assert.ok(mine.delta > 0 && theirs.delta < 0);
+  assert.deepEqual(theirs.opponentIds, ['аня', 'боря']);
+});
+
+test('несыгранный матч не заводит игроку ни точки, ни турнира', () => {
+  const history = ratingHistory([
+    played('1', { scoreA: 0, scoreB: 0 }),
+    played('2', { scoreA: 12, scoreB: 4 }),
+  ]);
+
+  const points = history.get('a')!;
+  assert.equal(points.length, 1);
+  assert.equal(points[0].tournamentId, '2');
 });
 
 // ---- Ступени ---------------------------------------------------------------
