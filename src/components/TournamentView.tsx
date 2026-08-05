@@ -26,7 +26,13 @@ import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending
 import { plural } from '@/lib/plural';
 import { failureMessage, request } from '@/lib/request';
 import type { ResultsCardData } from '@/lib/results-card';
-import { computeRatings, type RatedMatch } from '@/lib/rating';
+import {
+  computeRatings,
+  matchRatings,
+  type MatchRating,
+  type RatedMatch,
+  type TeamRating,
+} from '@/lib/rating';
 import { computeStandings, restingInRound } from '@/lib/standings';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
@@ -53,6 +59,59 @@ const BALANCE_TONE = [
   'bg-danger/15 text-danger',
   'bg-danger/15 text-danger',
 ];
+
+/** Знак всегда на месте: рядом с рейтингом «3» и «+3» — разные утверждения. */
+function signed(value: number): string {
+  return value > 0 ? `+${value}` : String(value);
+}
+
+/** Прибавка выделяется цветом, потеря остаётся приглушённой — как в таблице. */
+function Delta({ value }: { value: number }) {
+  return (
+    <span className={`tabular-nums ${value > 0 ? 'font-semibold text-accent' : ''}`}>
+      {signed(value)}
+    </span>
+  );
+}
+
+/**
+ * Рейтинг одной пары в сыгранном матче: сначала среднее по двоим — та самая
+ * сила пары, по которой считается ожидание, — потом каждый по отдельности, в
+ * том же порядке, в каком имена стоят в строке над этим.
+ */
+function TeamRatingBlock({
+  team,
+  playersById,
+  align,
+}: {
+  team: TeamRating;
+  playersById: Map<string, Player>;
+  align: 'left' | 'right';
+}) {
+  return (
+    <div className={`min-w-0 flex-1 ${align === 'right' ? 'text-right' : ''}`}>
+      <p className="font-semibold text-text">
+        ⌀ {team.rating} <Delta value={team.delta} />
+      </p>
+      {team.players.map((player) => (
+        <p key={player.id} className="truncate">
+          {playersById.get(player.id)?.name ?? '—'} {player.rating}{' '}
+          <Delta value={player.delta} />
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/** То же самое словами — карточка целиком читается одной строкой aria-label. */
+function ratingSummary(rating: MatchRating, playersById: Map<string, Player>): string {
+  const side = (team: TeamRating): string =>
+    team.players
+      .map((p) => `${playersById.get(p.id)?.name ?? '—'} ${p.rating} (${signed(p.delta)})`)
+      .join(', ') + `, в среднем ${team.rating} (${signed(team.delta)})`;
+
+  return `Рейтинг на конец матча: ${side(rating.teamA)}; ${side(rating.teamB)}`;
+}
 
 export default function TournamentView({
   initial,
@@ -196,6 +255,34 @@ export default function TournamentView({
         Math.round(r.rating) - Math.round(tournament.ratingBefore[id]?.rating ?? r.rating),
       ]),
     );
+  }, [tournament.matches, tournament.ratingBefore]);
+
+  /**
+   * Рейтинг четвёрки в каждом сыгранном матче — на тот момент, когда его
+   * доиграли. Прогон тот же, что у дельты за турнир, и от того же состояния:
+   * снимок матча — это просто место в этом прогоне.
+   *
+   * Отсюда и «сохраняется на момент завершения»: сыгранные позже матчи чисел в
+   * карточке не трогают, а поправленный счёт пересчитывает их вместе со всем
+   * остальным — расходиться с историей тут нечему.
+   */
+  const ratingByMatch = useMemo(() => {
+    const played = tournament.matches.filter(
+      (m): m is Match & { score1: number; score2: number } =>
+        m.score1 !== null && m.score2 !== null,
+    );
+
+    const rated = matchRatings(
+      played.map((m) => ({ teamA: m.team1, teamB: m.team2, scoreA: m.score1, scoreB: m.score2 })),
+      Object.entries(tournament.ratingBefore),
+    );
+
+    const byMatch = new Map<string, MatchRating>();
+    played.forEach((m, index) => {
+      const rating = rated[index];
+      if (rating) byMatch.set(m.id, rating);
+    });
+    return byMatch;
   }, [tournament.matches, tournament.ratingBefore]);
 
   // Насколько равны были команды в каждом сыгранном матче. Считается разом на
@@ -611,6 +698,7 @@ export default function TournamentView({
                     const team2Won = played && match.score2! > match.score1!;
                     const unsent = pendingIds.has(match.id);
                     const balance = balances.get(match.id) ?? null;
+                    const rating = ratingByMatch.get(match.id) ?? null;
 
                     const summary =
                       (played ? `счёт ${match.score1}:${match.score2}` : 'счёт не внесён') +
@@ -621,7 +709,8 @@ export default function TournamentView({
                             teamName(match.team1, playersById),
                             teamName(match.team2, playersById),
                           )}`
-                        : '');
+                        : '') +
+                      (rating ? `. ${ratingSummary(rating, playersById)}` : '');
 
                     return (
                       <li key={match.id}>
@@ -684,6 +773,27 @@ export default function TournamentView({
                               {teamName(match.team2, playersById)}
                             </span>
                           </div>
+
+                          {/* Рейтинг появляется вместе со счётом и стоит под
+                              составами, столбец в столбец с ними. Словами то
+                              же самое уже сказано в aria-label карточки. */}
+                          {rating && (
+                            <div
+                              aria-hidden="true"
+                              className="mt-2 flex items-start gap-3 border-t border-line/70 pt-2 text-[11px] leading-4 text-muted"
+                            >
+                              <TeamRatingBlock
+                                team={rating.teamA}
+                                playersById={playersById}
+                                align="left"
+                              />
+                              <TeamRatingBlock
+                                team={rating.teamB}
+                                playersById={playersById}
+                                align="right"
+                              />
+                            </div>
+                          )}
                         </button>
                       </li>
                     );
@@ -745,6 +855,14 @@ export default function TournamentView({
               Знак под счётом — насколько равны были команды. Считается по остальным матчам
               игроков, поэтому от результата самой встречи не зависит: острие смотрит на команду
               послабее, а чем больше символов, тем крупнее перекос. «=» — команды были равны.
+            </p>
+          )}
+
+          {ratingByMatch.size > 0 && (
+            <p className="text-xs leading-relaxed text-muted">
+              Числа под составами — клубный рейтинг на момент, когда матч доиграли: «⌀» — средний
+              по паре, ниже — каждый игрок. Рядом с каждым числом то, насколько его сдвинул этот
+              матч. Сыгранное позже эти числа уже не меняет.
             </p>
           )}
 

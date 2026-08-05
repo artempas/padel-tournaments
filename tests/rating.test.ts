@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {
   CALIBRATION_MATCHES,
   computeRatings,
+  matchRatings,
   RATING_TIERS,
   START_RATING,
   tierOf,
+  type MatchRating,
   type Rating,
   type RatedMatch,
 } from '../src/lib/rating.ts';
@@ -136,6 +138,103 @@ test('исходное состояние не портится расчётом
 
   assert.equal(before.get('a')!.rating, 186);
   assert.equal(before.get('a')!.matches, 50);
+});
+
+// ---- Снимки по матчам ------------------------------------------------------
+
+test('снимок матча — это рейтинг сразу после него, а не сегодняшний', () => {
+  const first = match({ scoreA: 12, scoreB: 4 });
+  const second = match({ scoreA: 4, scoreB: 12 });
+
+  const shots = matchRatings([first, second]) as MatchRating[];
+
+  // После первого матча «a» поднялся на 4.5 — 100 + 4.5 округляется до 105.
+  assert.equal(shots[0].teamA.players[0].rating, 105);
+  assert.equal(shots[0].teamA.players[0].delta, 5);
+
+  // Второй матч его опустил, но первый снимок этого уже не видит.
+  assert.ok(shots[1].teamA.players[0].rating < shots[0].teamA.players[0].rating);
+  assert.equal(shots[0].teamA.players[0].rating, 105);
+});
+
+test('снимок последнего матча совпадает с итоговой таблицей', () => {
+  const history = [
+    match({ scoreA: 13, scoreB: 3 }),
+    match({ teamA: ['a', 'c'], teamB: ['b', 'd'], scoreA: 6, scoreB: 10 }),
+    match({ teamA: ['a', 'd'], teamB: ['b', 'c'], scoreA: 9, scoreB: 7 }),
+  ];
+
+  const shots = matchRatings(history) as MatchRating[];
+  const table = computeRatings(history);
+  const last = shots[shots.length - 1];
+
+  for (const side of [last.teamA, last.teamB]) {
+    for (const player of side.players) {
+      assert.equal(player.rating, Math.round(table.get(player.id)!.rating));
+    }
+  }
+});
+
+test('изменения по матчам складываются в изменение за турнир', () => {
+  const history = [
+    match({ scoreA: 13, scoreB: 3 }),
+    match({ teamA: ['a', 'c'], teamB: ['b', 'd'], scoreA: 6, scoreB: 10 }),
+    match({ teamA: ['a', 'd'], teamB: ['b', 'c'], scoreA: 9, scoreB: 7 }),
+    match({ scoreA: 7, scoreB: 9 }),
+  ];
+  const before = seeded({ a: 121, b: 94, c: 107, d: 100 }, 12);
+
+  const shots = matchRatings(history, before) as MatchRating[];
+  const table = computeRatings(history, before);
+
+  for (const [id, start] of before) {
+    const moved = shots
+      .flatMap((s) => [...s.teamA.players, ...s.teamB.players])
+      .filter((p) => p.id === id)
+      .reduce((sum, p) => sum + p.delta, 0);
+
+    assert.equal(moved, Math.round(table.get(id)!.rating) - Math.round(start.rating));
+  }
+});
+
+test('средний рейтинг пары — среднее двоих на тот же момент', () => {
+  const shots = matchRatings(
+    [match({ scoreA: 16, scoreB: 0 })],
+    seeded({ a: 140, b: 120, c: 100, d: 100 }),
+  ) as MatchRating[];
+
+  const [first, second] = shots[0].teamA.players;
+  assert.equal(shots[0].teamA.rating, Math.round((first.rating + second.rating) / 2));
+  // Пара выиграла — среднее выросло относительно (140 + 120) / 2.
+  assert.equal(shots[0].teamA.delta, shots[0].teamA.rating - 130);
+  assert.ok(shots[0].teamA.delta > 0);
+  // Проигравшая сторона на столько же вниз: опыт у всех четверых одинаковый.
+  assert.equal(shots[0].teamB.delta, -shots[0].teamA.delta);
+});
+
+test('игроки в снимке стоят в том же порядке, в каком их подали', () => {
+  const shots = matchRatings([
+    match({ teamA: ['ольга', 'пётр'], teamB: ['аня', 'женя'], scoreA: 10, scoreB: 6 }),
+  ]) as MatchRating[];
+
+  assert.deepEqual(
+    shots[0].teamA.players.map((p) => p.id),
+    ['ольга', 'пётр'],
+  );
+  assert.deepEqual(
+    shots[0].teamB.players.map((p) => p.id),
+    ['аня', 'женя'],
+  );
+});
+
+test('у матча без счёта снимка нет, но место в ответе остаётся', () => {
+  const shots = matchRatings([match({ scoreA: 0, scoreB: 0 }), match({ scoreA: 12, scoreB: 4 })]);
+
+  assert.equal(shots.length, 2);
+  assert.equal(shots[0], null);
+  assert.notEqual(shots[1], null);
+  // Несыгранный матч не должен был завести игрокам ни рейтинга, ни опыта.
+  assert.equal(shots[1]!.teamA.players[0].rating - shots[1]!.teamA.players[0].delta, START_RATING);
 });
 
 // ---- Ступени ---------------------------------------------------------------

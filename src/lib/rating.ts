@@ -56,6 +56,27 @@ export interface Rating {
   matches: number;
 }
 
+/** Игрок на момент, когда матч доигран. Уже в целых — как на экране. */
+export interface PlayerRating {
+  id: string;
+  /** Каким рейтинг стал по завершении этого матча. */
+  rating: number;
+  /** Насколько его сдвинул этот матч. */
+  delta: number;
+}
+
+/** Пара на тот же момент: двое и их среднее — та самая сила пары из расчёта. */
+export interface TeamRating {
+  players: [PlayerRating, PlayerRating];
+  rating: number;
+  delta: number;
+}
+
+export interface MatchRating {
+  teamA: TeamRating;
+  teamB: TeamRating;
+}
+
 /**
  * Насколько сильно матч двигает рейтинг. Новичок за один вечер (в американо
  * это семь матчей) находит своё место, ветеран не скачет от одного неудачного
@@ -65,6 +86,96 @@ function kFactor(matches: number): number {
   if (matches < CALIBRATION_MATCHES) return 18;
   if (matches < 30) return 14;
   return 11;
+}
+
+/**
+ * Снимок пары: что стало с каждым и со средним по двоим.
+ *
+ * Дельта считается по разнице показанных чисел, а не сырых: тогда изменения
+ * матчей складываются ровно в изменение за турнир, без расхождения в единицу
+ * там, где копейки набежали в целое.
+ */
+function snapshot(
+  ids: readonly [string, string],
+  before: readonly [number, number],
+  rows: Rating[],
+): TeamRating {
+  const meanBefore = (before[0] + before[1]) / 2;
+  const meanAfter = (rows[0].rating + rows[1].rating) / 2;
+
+  return {
+    players: [0, 1].map((i) => ({
+      id: ids[i],
+      rating: Math.round(rows[i].rating),
+      delta: Math.round(rows[i].rating) - Math.round(before[i]),
+    })) as [PlayerRating, PlayerRating],
+    rating: Math.round(meanAfter),
+    delta: Math.round(meanAfter) - Math.round(meanBefore),
+  };
+}
+
+/**
+ * Прогоняет матчи в том порядке, в каком их сыграли, меняя `table` по пути, и
+ * отдаёт снимок после каждого из них.
+ *
+ * Генератор, а не массив: рейтинг клуба считается по всей его истории, и
+ * снимки там никому не нужны — так они и не копятся. `null` — у матча, который
+ * сыгранным не считается.
+ */
+function* replay(
+  matches: Iterable<RatedMatch>,
+  table: Map<string, Rating>,
+): Generator<MatchRating | null> {
+  function get(id: string): Rating {
+    let row = table.get(id);
+    if (!row) table.set(id, (row = { rating: START_RATING, matches: 0 }));
+    return row;
+  }
+
+  for (const match of matches) {
+    const total = match.scoreA + match.scoreB;
+    // Несыгранный матч сюда попасть не должен, но 0:0 не нормируется, и
+    // деление на ноль — худший способ об этом узнать.
+    if (total <= 0) {
+      yield null;
+      continue;
+    }
+
+    const a = match.teamA.map(get);
+    const b = match.teamB.map(get);
+
+    const beforeA: [number, number] = [a[0].rating, a[1].rating];
+    const beforeB: [number, number] = [b[0].rating, b[1].rating];
+
+    // Сила пары — среднее двоих: партнёр слабее делает победу ожидаемее для
+    // соперника, и рейтинг сам это учитывает.
+    const ratingA = (beforeA[0] + beforeA[1]) / 2;
+    const ratingB = (beforeB[0] + beforeB[1]) / 2;
+
+    const expected = 1 / (1 + 10 ** ((ratingB - ratingA) / SCALE));
+    const surplus = match.scoreA / total - expected;
+
+    // Все четыре дельты считаются от рейтингов до матча, поэтому порядок
+    // обхода четвёрки ни на что не влияет. Сумма изменений строго нулевая
+    // только при равных K: у новичка коэффициент выше, и его матч слегка
+    // подкачивает рейтинг в клуб. Это цена быстрой сходимости новичков, и она
+    // того стоит — иначе первые вечера рейтинг не значил бы ничего.
+    for (const p of a) p.rating += kFactor(p.matches) * surplus;
+    for (const p of b) p.rating -= kFactor(p.matches) * surplus;
+    for (const p of [...a, ...b]) p.matches++;
+
+    yield {
+      teamA: snapshot(match.teamA, beforeA, a),
+      teamB: snapshot(match.teamB, beforeB, b),
+    };
+  }
+}
+
+/** Стартовое состояние прогона. Копия: чужую таблицу расчёт не портит. */
+function seed(initial?: Iterable<readonly [string, Rating]>): Map<string, Rating> {
+  const table = new Map<string, Rating>();
+  for (const [id, r] of initial ?? []) table.set(id, { ...r });
+  return table;
 }
 
 /**
@@ -80,43 +191,33 @@ export function computeRatings(
   matches: Iterable<RatedMatch>,
   initial?: Iterable<readonly [string, Rating]>,
 ): Map<string, Rating> {
-  const table = new Map<string, Rating>();
-  for (const [id, r] of initial ?? []) table.set(id, { ...r });
-
-  function get(id: string): Rating {
-    let row = table.get(id);
-    if (!row) table.set(id, (row = { rating: START_RATING, matches: 0 }));
-    return row;
+  const table = seed(initial);
+  const run = replay(matches, table);
+  while (!run.next().done) {
+    // Прогон нужен целиком, а его снимки — нет: здесь важна только таблица,
+    // которую он заполняет по дороге.
   }
-
-  for (const match of matches) {
-    const total = match.scoreA + match.scoreB;
-    // Несыгранный матч сюда попасть не должен, но 0:0 не нормируется, и
-    // деление на ноль — худший способ об этом узнать.
-    if (total <= 0) continue;
-
-    const a = match.teamA.map(get);
-    const b = match.teamB.map(get);
-
-    // Сила пары — среднее двоих: партнёр слабее делает победу ожидаемее для
-    // соперника, и рейтинг сам это учитывает.
-    const ratingA = (a[0].rating + a[1].rating) / 2;
-    const ratingB = (b[0].rating + b[1].rating) / 2;
-
-    const expected = 1 / (1 + 10 ** ((ratingB - ratingA) / SCALE));
-    const surplus = match.scoreA / total - expected;
-
-    // Все четыре дельты считаются от рейтингов до матча, поэтому порядок
-    // обхода четвёрки ни на что не влияет. Сумма изменений строго нулевая
-    // только при равных K: у новичка коэффициент выше, и его матч слегка
-    // подкачивает рейтинг в клуб. Это цена быстрой сходимости новичков, и она
-    // того стоит — иначе первые вечера рейтинг не значил бы ничего.
-    for (const p of a) p.rating += kFactor(p.matches) * surplus;
-    for (const p of b) p.rating -= kFactor(p.matches) * surplus;
-    for (const p of [...a, ...b]) p.matches++;
-  }
-
   return table;
+}
+
+/**
+ * Рейтинг четвёрки в каждом матче — такой, каким он стал на момент, когда матч
+ * доиграли. Не сегодняшний: следующие матчи этих людей на снимок не влияют,
+ * поэтому карточка сыгранного матча показывает то, что было тогда.
+ *
+ * Хранить снимки не нужно ровно по той же причине, по какой не хранится сам
+ * рейтинг: он — функция от истории, и прогон по ней восстанавливает состояние
+ * на любой её момент. Поправленный задним числом счёт при этом пересчитывает и
+ * снимки, а записанное в базу число разошлось бы с историей молча.
+ *
+ * Ответ идёт матч в матч с тем, что подали на вход: `null` стоит там, где
+ * рейтингу считать нечего (0:0), — иначе места бы разъехались.
+ */
+export function matchRatings(
+  matches: Iterable<RatedMatch>,
+  initial?: Iterable<readonly [string, Rating]>,
+): Array<MatchRating | null> {
+  return [...replay(matches, seed(initial))];
 }
 
 export type TierId = 'calibration' | 'bronze' | 'silver' | 'gold' | 'platinum' | 'diamond';
