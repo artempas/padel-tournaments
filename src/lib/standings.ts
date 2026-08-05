@@ -54,6 +54,28 @@ export function computeStandings(players: Player[], matches: Match[]): Standing[
   );
 }
 
+/**
+ * Сколько раундов каждый просидел на скамейке.
+ *
+ * Считается по расписанию, а не по сыгранному: раунд без внесённого счёта для
+ * скамейки такой же раунд, как остальные. Считай по матчам в таблице — и
+ * четвёрка из незаписанного матча выглядела бы отдыхавшей, то есть села бы
+ * снова, уже по-настоящему.
+ */
+export function restCounts(players: Player[], matches: Match[]): Map<string, number> {
+  const rounds = new Set(matches.map((m) => m.round));
+  const rested = new Map(players.map((p) => [p.id, rounds.size]));
+
+  for (const m of matches) {
+    for (const id of [...m.team1, ...m.team2]) {
+      const left = rested.get(id);
+      if (left !== undefined) rested.set(id, left - 1);
+    }
+  }
+
+  return rested;
+}
+
 /** Players sitting out a given round — everyone not scheduled on a court. */
 export function restingInRound(players: Player[], matches: Match[], round: number): Player[] {
   const playing = new Set<string>();

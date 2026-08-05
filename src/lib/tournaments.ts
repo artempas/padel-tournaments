@@ -21,7 +21,7 @@ import { canScore, isAtLeast, type ClubRole } from './permissions';
 import { prisma } from './prisma';
 import { START_RATING, type Rating } from './rating';
 import { ratingsForClub, upsertPeople } from './roster';
-import { computeStandings } from './standings';
+import { computeStandings, restCounts } from './standings';
 import type {
   Match,
   PlayableFormat,
@@ -176,15 +176,33 @@ export async function createTournament(
   // У американо расписание известно целиком заранее. У mexicano заранее
   // известен только первый раунд — остальные достраиваются по таблице, по
   // мере того как приходят результаты (см. extendMexicano).
-  const planned =
-    format === 'americano'
-      ? generateAmericano(players.length, courts).matches
-      : planRound(1, firstRound(players.length, courts));
+  const schedule =
+    format === 'americano' ? generateAmericano(players.length, courts).matches : null;
+
+  // Первый раунд мексикано сеется по клубному рейтингу, так что он нужен до
+  // сборки расписания. Читается вне транзакции: у тех, кого клуб ещё не видел,
+  // истории нет, и появление их строк ниже на рейтинг не влияет.
+  const ratings = format === 'mexicano' ? await ratingsForClub(clubId) : null;
 
   return prisma.$transaction(async (tx) => {
     // Everyone entered here joins the club's permanent roster, which is what
     // makes cross-tournament totals possible.
     const people = await upsertPeople(tx, clubId, players);
+
+    const planned =
+      schedule ??
+      planRound(
+        1,
+        firstRound(
+          // firstRound знает игроков местами в списке — рейтинги идут в том же
+          // порядке. Кто клубу незнаком, входит со стартовым.
+          players.map(
+            (playerName) =>
+              ratings?.get(people.get(normalizeKey(playerName))!)?.rating ?? START_RATING,
+          ),
+          courts,
+        ),
+      );
 
     // Участники заводятся вместе с турниром: seat N совпадает с индексом N,
     // по которому генератор расставил игроков в расписании.
@@ -503,10 +521,12 @@ async function extendMexicano(
   if (matches.some((m) => m.round === lastRound && m.score1 === null)) return;
 
   // Тот же порядок, что видит организатор в таблице: пары следующего раунда
-  // должны читаться прямо с экрана.
+  // должны читаться прямо с экрана. Скамейка при этом считается по расписанию
+  // целиком, а не по таблице: садится тот, кто сидел меньше всех.
   const standings = computeStandings(players, matches);
+  const rested = restCounts(players, matches);
   const round = nextRound(
-    standings.map((row) => row.played),
+    standings.map((row) => rested.get(row.playerId) ?? 0),
     t.courts,
   );
 

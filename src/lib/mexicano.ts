@@ -3,13 +3,14 @@
  *
  * Format rules:
  *  - every match is 2 vs 2 and the tournament runs a fixed number of rounds;
- *  - the opening round is drawn at random — there is no table to sort by yet;
+ *  - the opening round is seeded by club rating — there is no table yet, but
+ *    there is history, and it says more about strength than a draw does;
  *  - every later round is built from the standings as they stand: the four
  *    leaders meet on court 1, the next four on court 2, and so on;
  *  - inside a foursome the pairing is 1st + 4th against 2nd + 3rd, which is
  *    what keeps a match between four differently ranked players close;
- *  - when n is not a multiple of 4 some players rest — whoever has played most
- *    sits out first, so rest keeps circulating.
+ *  - when n is not a multiple of 4 some players rest — the bench goes to
+ *    whoever has sat out least, so rest keeps circulating.
  *
  * Unlike Americano there is nothing to search for: a round is a deterministic
  * function of the table, so the schedule can only be built one round at a time,
@@ -69,38 +70,52 @@ function seatByRank(ordered: number[], courtCount: number): RoundMatch[] {
 }
 
 /**
- * The opening round. Indices are seats — the order players were entered in —
- * and the draw is random, so seat order carries no advantage.
+ * The opening round, seeded by rating: `ratings[i]` belongs to seat `i` — the
+ * order players were entered in — and the strongest four open court 1.
+ *
+ * Equal ratings are separated by the draw, not by seat order: in a new club
+ * everyone starts level, and entering players in strength order must not stack
+ * the first court.
  */
-export function firstRound(playerCount: number, courts: number, seed?: number): RoundMatch[] {
+export function firstRound(ratings: number[], courts: number, seed?: number): RoundMatch[] {
+  const playerCount = ratings.length;
   assertField(playerCount, courts);
+
   const rng = mulberry32(seed ?? ((Math.random() * 2 ** 32) >>> 0));
-  const seats = Array.from({ length: playerCount }, (_, i) => i);
-  return seatByRank(shuffle(seats, rng), matchesPerRound(playerCount, courts));
+  const seats = shuffle(
+    Array.from({ length: playerCount }, (_, i) => i),
+    rng,
+  );
+
+  // Сортировка стабильная, поэтому жребий выше решает ровно то, чего не решил
+  // рейтинг, — порядок внутри равных.
+  seats.sort((a, b) => ratings[b] - ratings[a]);
+
+  return seatByRank(seats, matchesPerRound(playerCount, courts));
 }
 
 /**
- * The next round, given how many matches each player has behind them **in
- * standings order** — `played[0]` belongs to the current leader.
+ * The next round, given how many rounds each player has spent on the bench **in
+ * standings order** — `rested[0]` belongs to the current leader.
  *
  * Returned indices refer to that same order, so the caller maps position in
  * the table back to a player.
  */
-export function nextRound(played: number[], courts: number): RoundMatch[] {
-  const playerCount = played.length;
+export function nextRound(rested: number[], courts: number): RoundMatch[] {
+  const playerCount = rested.length;
   assertField(playerCount, courts);
 
   const courtCount = matchesPerRound(playerCount, courts);
   const seats = courtCount * 4;
 
-  // Who sits out: most games first, and among equals the lower half of the
-  // table — a leader losing court time would distort the very ranking the
+  // Who sits out: the least-rested first, and among equals the lower half of
+  // the table — a leader losing court time would distort the very ranking the
   // next round is built from.
   const ranks = Array.from({ length: playerCount }, (_, rank) => rank);
   const resting = new Set(
     ranks
       .slice()
-      .sort((a, b) => played[b] - played[a] || b - a)
+      .sort((a, b) => rested[a] - rested[b] || b - a)
       .slice(0, playerCount - seats),
   );
 

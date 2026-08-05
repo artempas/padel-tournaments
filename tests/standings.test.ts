@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeStandings, restingInRound } from '../src/lib/standings.ts';
+import { computeStandings, restCounts, restingInRound } from '../src/lib/standings.ts';
 import type { Match, Player } from '../src/lib/types.ts';
 
 const players: Player[] = [
@@ -98,6 +98,34 @@ test('every point scored lands in exactly one player total', () => {
   ];
   const total = computeStandings(players, matches).reduce((s, r) => s + r.pointsFor, 0);
   assert.equal(total, (16 + 16) * 2);
+});
+
+test('bench time counts rounds a player was not scheduled in', () => {
+  const rested = restCounts(players, [
+    match({ id: 'm1', round: 1, team1: ['a', 'b'], team2: ['c', 'd'] }),
+    match({ id: 'm2', round: 2, team1: ['a', 'b'], team2: ['e', 'f'] }),
+  ]);
+
+  assert.deepEqual([...rested.entries()].sort(), [
+    ['a', 0],
+    ['b', 0],
+    ['c', 1],
+    ['d', 1],
+    ['e', 1],
+    ['f', 1],
+  ]);
+});
+
+test('bench time counts scheduled rounds, not scored ones', () => {
+  // Счёт первого раунда ещё не внесли — на скамейке от этого никто не сидел.
+  const rested = restCounts(players, [
+    match({ id: 'm1', round: 1, team1: ['a', 'b'], team2: ['c', 'd'] }),
+    match({ id: 'm2', round: 2, team1: ['e', 'f'], team2: ['c', 'd'], score1: 9, score2: 7 }),
+  ]);
+
+  assert.equal(rested.get('a'), 1);
+  assert.equal(rested.get('c'), 0);
+  assert.equal(rested.get('e'), 1);
 });
 
 test('resting players are those absent from the round', () => {
