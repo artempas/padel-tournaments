@@ -241,6 +241,93 @@ test('у матча без счёта снимка нет, но место в о
   assert.equal(shots[1]!.teamA.players[0].rating - shots[1]!.teamA.players[0].delta, START_RATING);
 });
 
+// ---- Ожидание в карточке матча ---------------------------------------------
+
+/** Ожидание матча, сыгранного парой `100 + gap` против пары `100`. */
+function outlook(gap: number, scoreA: number, scoreB: number) {
+  const [shot] = matchRatings(
+    [match({ scoreA, scoreB })],
+    seeded({ a: 100 + gap, b: 100 + gap, c: 100, d: 100 }),
+  );
+  return shot!.outlook;
+}
+
+test('у равных пар ожидание — ровный счёт и знак равенства', () => {
+  const even = outlook(0, 8, 8);
+
+  assert.equal(even.symbols, '=');
+  assert.equal(even.level, 0);
+  assert.equal(even.stronger, null);
+  assert.deepEqual(even.score, [8, 8]);
+});
+
+test('острие смотрит на пару послабее, а число символов — на разрыв', () => {
+  assert.equal(outlook(86, 8, 8).symbols, '>>>');
+  assert.equal(outlook(86, 8, 8).stronger, 'A');
+
+  // Та же четвёрка, но сильные записаны второй парой.
+  const [mirrored] = matchRatings(
+    [match({ scoreA: 8, scoreB: 8 })],
+    seeded({ a: 100, b: 100, c: 186, d: 186 }),
+  );
+  assert.equal(mirrored!.outlook.symbols, '<<<');
+  assert.equal(mirrored!.outlook.stronger, 'B');
+});
+
+test('счёт самого матча на оценку сил не влияет', () => {
+  // Разгром вопреки ожиданию не делает разгромивших сильными: знак считается
+  // по рейтингам до матча. Иначе чип пересказывал бы счёт.
+  assert.equal(outlook(50, 0, 16).symbols, outlook(50, 16, 0).symbols);
+});
+
+test('границы перекоса', () => {
+  const at = (gap: number) => outlook(gap, 8, 8).level;
+
+  assert.deepEqual([12, 13, 28, 29, 50, 51].map(at), [0, 1, 1, 2, 2, 3]);
+});
+
+test('ожидаемый счёт растёт с нормой матча, а перекос от неё не зависит', () => {
+  // Разрыв 40 — это ожидание 10:6 в матче до 16 и ровно то же самое до 32.
+  const to16 = outlook(40, 10, 6);
+  const to32 = outlook(40, 20, 12);
+
+  assert.deepEqual(to16.score, [10, 6]);
+  assert.deepEqual(to32.score, [20, 12]);
+  assert.equal(to16.symbols, to32.symbols);
+});
+
+test('ожидаемый счёт — тот самый, который оставляет рейтинг на месте', () => {
+  const par = outlook(40, 10, 6);
+
+  assert.equal(par.surprise, 0);
+  assert.equal(par.unexpected, false);
+  // Ровно по ожиданию — значит и рейтинг никуда не двинулся.
+  const [shot] = matchRatings(
+    [match({ scoreA: par.score[0], scoreB: par.score[1] })],
+    seeded({ a: 140, b: 140, c: 100, d: 100 }),
+  );
+  assert.equal(shot!.teamA.players[0].delta, 0);
+});
+
+test('неожиданным считается расхождение больше чем на два очка', () => {
+  // Равные пары, ожидание 8:8: на два очка мимо — ещё не новость.
+  assert.equal(outlook(0, 10, 6).surprise, 2);
+  assert.equal(outlook(0, 10, 6).unexpected, false);
+
+  assert.equal(outlook(0, 11, 5).surprise, 3);
+  assert.equal(outlook(0, 11, 5).unexpected, true);
+
+  // Расхождение у обеих пар одно: сумма очков у ожидаемого счёта та же.
+  assert.equal(outlook(0, 5, 11).surprise, 3);
+});
+
+test('ожидаемая победа фаворита неожиданностью не считается, скромная — да', () => {
+  // Разрыв 86 обязывает выигрывать 12:4.
+  assert.equal(outlook(86, 12, 4).unexpected, false);
+  // Победа 9:7 — это провал ожиданий на три очка, хоть и победа.
+  assert.equal(outlook(86, 9, 7).unexpected, true);
+});
+
 // ---- История по турнирам ---------------------------------------------------
 
 function played(tournamentId: string, over: Partial<RatedMatch>): PlayedMatch {

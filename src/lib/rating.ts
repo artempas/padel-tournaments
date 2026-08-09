@@ -72,9 +72,36 @@ export interface TeamRating {
   delta: number;
 }
 
+/**
+ * Чего рейтинг ждал от матча — и насколько результат от этого отличался.
+ *
+ * Всё считается по рейтингам до матча, поэтому счёт на ожидание не влияет:
+ * «ждали 10:6, вышло 3:13» — это факт, а «сильные выиграли, потому что
+ * выиграли» — нет. Таблица турнира сказать этого не может вовсе: она не знает,
+ * против кого набраны очки, и первый матч вечера для неё вообще пуст.
+ */
+export interface MatchOutlook {
+  /** Доля очков, которую рейтинг ждал от пары A. */
+  share: number;
+  /** Ожидаемый счёт — при той же сумме очков, которую разыграли на корте. */
+  score: [number, number];
+  /** На сколько очков фактический счёт разошёлся с ожидаемым. */
+  surprise: number;
+  /** Разошёлся настолько, что это стоит пометки. */
+  unexpected: boolean;
+  /** '=' либо '>' / '<', повторённые 1–3 раза; остриё смотрит на пару послабее. */
+  symbols: string;
+  level: 0 | 1 | 2 | 3;
+  /** Какая пара была сильнее по рейтингу: A, B или никакая. */
+  stronger: 'A' | 'B' | null;
+  /** «равны по силе», «немного сильнее», … — без склонений и рода. */
+  wording: string;
+}
+
 export interface MatchRating {
   teamA: TeamRating;
   teamB: TeamRating;
+  outlook: MatchOutlook;
 }
 
 /**
@@ -97,6 +124,57 @@ export function kFactor(matches: number): number {
  */
 export function expectedShare(ratingA: number, ratingB: number): number {
   return 1 / (1 + 10 ** ((ratingB - ratingA) / SCALE));
+}
+
+/**
+ * Ожидание, переведённое в счёт: доля от суммы очков, которую разыграли.
+ *
+ * Одна функция на всё приложение — карточка матча и экран «как работает
+ * рейтинг» показывают одно и то же число, и разойтись им негде.
+ */
+export function parScore(share: number, total: number): [number, number] {
+  const forA = Math.round(share * total);
+  return [forA, total - forA];
+}
+
+/**
+ * Пороги перекоса — в долях разыгранного, а не в очках: одну и ту же четвёрку
+ * вечер до 16 и вечер до 32 должны оценивать одинаково.
+ *
+ * Мерой служит ожидаемый отрыв: 0 — ждали ровного счёта, 1 — ждали всухую.
+ * В рейтинге это разрывы средних по паре примерно в 13, 29 и 51 пункт. Шкала
+ * заметно смелее, чем доля очков в таблице: та внутри одного вечера почти не
+ * расходится, а рейтинг помнит всю историю клуба и разницу в силе видит прямо.
+ */
+const GAP_STEPS = [0.08, 0.18, 0.31];
+
+const GAP_WORDING = ['равны по силе', 'немного сильнее', 'заметно сильнее', 'намного сильнее'];
+
+/**
+ * Насколько счёт должен разойтись с ожидаемым, чтобы матч стоило пометить
+ * неожиданным. Два очка — это ещё разброс округления и одного розыгрыша.
+ */
+export const SURPRISE_POINTS = 2;
+
+function outlookOf(share: number, scoreA: number, scoreB: number): MatchOutlook {
+  const score = parScore(share, scoreA + scoreB);
+  const margin = Math.abs(2 * share - 1);
+  const level = GAP_STEPS.filter((step) => margin >= step).length as MatchOutlook['level'];
+  const stronger = level === 0 ? null : share > 0.5 ? 'A' : 'B';
+  // Разошлось на столько же, на сколько и у второй пары: сумма очков у
+  // ожидаемого счёта и у фактического одна.
+  const surprise = Math.abs(scoreA - score[0]);
+
+  return {
+    share,
+    score,
+    surprise,
+    unexpected: surprise > SURPRISE_POINTS,
+    symbols: stronger === null ? '=' : (stronger === 'A' ? '>' : '<').repeat(level),
+    level,
+    stronger,
+    wording: GAP_WORDING[level],
+  };
 }
 
 /**
@@ -178,6 +256,9 @@ function* replay(
     yield {
       teamA: snapshot(match.teamA, beforeA, a),
       teamB: snapshot(match.teamB, beforeB, b),
+      // По тем же `expected` и счёту, по которым только что двинулся рейтинг:
+      // ожидание в карточке — это ровно то, с чем сравнивал движок.
+      outlook: outlookOf(expected, match.scoreA, match.scoreB),
     };
   }
 }
@@ -220,6 +301,9 @@ export function computeRatings(
  * рейтинг: он — функция от истории, и прогон по ней восстанавливает состояние
  * на любой её момент. Поправленный задним числом счёт при этом пересчитывает и
  * снимки, а записанное в базу число разошлось бы с историей молча.
+ *
+ * Вместе с рейтингом идёт `outlook` — чего от матча ждали до того, как его
+ * сыграли: он считается по рейтингам на входе, ещё не сдвинутым результатом.
  *
  * Ответ идёт матч в матч с тем, что подали на вход: `null` стоит там, где
  * рейтингу считать нечего (0:0), — иначе места бы разъехались.

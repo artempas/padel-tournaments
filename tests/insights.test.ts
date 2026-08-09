@@ -1,9 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  balanceContext,
   dynamicsInsights,
-  matchBalance,
   positionsById,
   roundHistory,
   tournamentInsights,
@@ -51,57 +49,6 @@ const comeback: Match[] = [
   match(4, ['d', 'b'], 24, ['a', 'c']),
   match(5, ['d', 'c'], 24, ['a', 'b']),
 ];
-
-test('сила команд без второго матча не считается', () => {
-  const matches = [match(1, ['a', 'b'], 20, ['c', 'd'])];
-  assert.equal(matchBalance(balanceContext(matches), matches[0]), null);
-});
-
-test('равные по остальным матчам команды помечаются знаком равенства', () => {
-  const matches = [
-    match(1, ['a', 'b'], 12, ['c', 'd']),
-    match(2, ['a', 'c'], 12, ['b', 'd']),
-    match(3, ['a', 'd'], 12, ['b', 'c']),
-  ];
-  const balance = matchBalance(balanceContext(matches), matches[0]);
-
-  assert.equal(balance?.symbols, '=');
-  assert.equal(balance?.stronger, null);
-});
-
-test('острие смотрит на слабую команду, а число символов — на разрыв', () => {
-  const matches = [
-    match(1, ['a', 'b'], 20, ['c', 'd']),
-    match(2, ['a', 'b'], 20, ['c', 'd']),
-    match(3, ['a', 'b'], 20, ['c', 'd']),
-  ];
-  const context = balanceContext(matches);
-
-  const first = matchBalance(context, matches[0]);
-  assert.equal(first?.symbols, '>>>');
-  assert.equal(first?.stronger, 1);
-
-  // Та же четвёрка, но сильные записаны второй командой.
-  const mirrored = matches.map((m) => ({
-    ...m,
-    team1: m.team2,
-    team2: m.team1,
-    score1: m.score2,
-    score2: m.score1,
-  }));
-  assert.equal(matchBalance(balanceContext(mirrored), mirrored[0])?.symbols, '<<<');
-});
-
-test('счёт самого матча на оценку сил не влияет', () => {
-  const matches = [
-    match(1, ['a', 'b'], 24, ['c', 'd']),
-    match(2, ['a', 'c'], 12, ['b', 'd']),
-    match(3, ['a', 'd'], 12, ['b', 'c']),
-  ];
-  // Разгром в первом матче — единственное, что отличает команды, и именно он
-  // из расчёта исключён: по остальным встречам все четверо равны.
-  assert.equal(matchBalance(balanceContext(matches), matches[0])?.symbols, '=');
-});
 
 test('на трёх матчах фактов ещё нет', () => {
   assert.deepEqual(tournamentInsights(players, evenTournament.slice(0, 3)), []);

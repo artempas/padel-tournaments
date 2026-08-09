@@ -9,15 +9,7 @@ import ScoreSheet from './ScoreSheet';
 import ShareResultsSheet from './ShareResultsSheet';
 import ThemeToggle from './ThemeToggle';
 import { awaitsScore, formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
-import {
-  balanceContext,
-  balanceSummary,
-  dynamicsInsights,
-  matchBalance,
-  roundHistory,
-  tournamentInsights,
-  type MatchBalance,
-} from '@/lib/insights';
+import { dynamicsInsights, roundHistory, tournamentInsights } from '@/lib/insights';
 import { MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
 import { can, canScore, type ClubRole } from '@/lib/permissions';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
@@ -29,6 +21,8 @@ import type { ResultsCardData } from '@/lib/results-card';
 import {
   computeRatings,
   matchRatings,
+  SURPRISE_POINTS,
+  type MatchOutlook,
   type MatchRating,
   type RatedMatch,
   type TeamRating,
@@ -51,9 +45,9 @@ function teamName(ids: [string, string], playersById: Map<string, Player>): stri
 
 /**
  * Цвет чипа по силе перекоса: зелёный — команды равны, жёлтый — перекос
- * заметен, красный — матч был неравным. Индекс — это `MatchBalance.level`.
+ * заметен, красный — матч был неравным. Индекс — это `MatchOutlook.level`.
  */
-const BALANCE_TONE = [
+const OUTLOOK_TONE = [
   'bg-accent/10 text-accent',
   'bg-warn/15 text-warn',
   'bg-danger/15 text-danger',
@@ -101,6 +95,28 @@ function TeamRatingBlock({
       ))}
     </div>
   );
+}
+
+/** «3 очка» — разница, переведённая в то, как о ней говорят вслух. */
+function points(count: number): string {
+  return `${count} ${plural(count, 'очко', 'очка', 'очков')}`;
+}
+
+/**
+ * Знак под счётом и ожидаемый счёт — словами. Читается там же, где и всё
+ * остальное о матче: чипы и колонки под составами для screen reader скрыты.
+ */
+function outlookSummary(outlook: MatchOutlook, teamA: string, teamB: string): string {
+  const par = `${outlook.score[0]}:${outlook.score[1]}`;
+  const head =
+    outlook.stronger === null
+      ? `По рейтингу пары были равны, ожидаемый счёт ${par}`
+      : `По рейтингу ${outlook.stronger === 'A' ? teamA : teamB} ${outlook.wording}, ` +
+        `ожидаемый счёт ${par}`;
+
+  return outlook.unexpected
+    ? `${head}. Неожиданный результат: разошлось с ожидаемым на ${points(outlook.surprise)}`
+    : head;
 }
 
 /** То же самое словами — карточка целиком читается одной строкой aria-label. */
@@ -284,19 +300,6 @@ export default function TournamentView({
     });
     return byMatch;
   }, [tournament.matches, tournament.ratingBefore]);
-
-  // Насколько равны были команды в каждом сыгранном матче. Считается разом на
-  // весь турнир: сила игрока — это все его остальные матчи, и меняется она с
-  // каждым внесённым счётом.
-  const balances = useMemo(() => {
-    const context = balanceContext(tournament.matches);
-    const map = new Map<string, MatchBalance>();
-    for (const match of tournament.matches) {
-      const balance = matchBalance(context, match);
-      if (balance) map.set(match.id, balance);
-    }
-    return map;
-  }, [tournament.matches]);
 
   const playedCount = tournament.matches.filter((m) => m.score1 !== null).length;
   // У мексикано матчи создаются раунд за раундом, поэтому длину турнира
@@ -740,8 +743,8 @@ export default function TournamentView({
                     const team1Won = played && match.score1! > match.score2!;
                     const team2Won = played && match.score2! > match.score1!;
                     const unsent = pendingIds.has(match.id);
-                    const balance = balances.get(match.id) ?? null;
                     const rating = ratingByMatch.get(match.id) ?? null;
+                    const outlook = rating?.outlook ?? null;
 
                     const summary =
                       (played
@@ -750,9 +753,9 @@ export default function TournamentView({
                           ? 'матч пропущен, счёт можно внести позже'
                           : 'счёт не внесён') +
                       (unsent ? ', ещё не отправлен' : '') +
-                      (balance
-                        ? `. ${balanceSummary(
-                            balance,
+                      (outlook
+                        ? `. ${outlookSummary(
+                            outlook,
                             teamName(match.team1, playersById),
                             teamName(match.team2, playersById),
                           )}`
@@ -790,6 +793,16 @@ export default function TournamentView({
                               <span className="text-xs font-medium text-muted">
                                 пропущен · счёт позже
                               </span>
+                            ) : outlook?.unexpected ? (
+                              /* Плашка стоит в шапке карточки, а не рядом с
+                                 числами: это про матч целиком, и заметной она
+                                 должна быть раньше, чем в цифры вглядятся. */
+                              <span
+                                className="rounded-full bg-warn/15 px-2 py-0.5 text-[11px] font-semibold text-warn"
+                                aria-hidden="true"
+                              >
+                                неожиданный результат
+                              </span>
                             ) : (
                               !played && (
                                 <span className="text-xs font-medium text-accent">Внести счёт</span>
@@ -809,16 +822,16 @@ export default function TournamentView({
                               <span className="text-base font-bold tabular-nums">
                                 {played ? `${match.score1} : ${match.score2}` : '–  :  –'}
                               </span>
-                              {/* Острие смотрит на команду послабее; чем больше
-                                  символов, тем крупнее был перекос. */}
-                              {balance && (
+                              {/* Острие смотрит на пару послабее по рейтингу;
+                                  чем больше символов, тем крупнее был перекос. */}
+                              {outlook && (
                                 <span
                                   aria-hidden="true"
                                   className={`rounded px-1.5 py-px text-[11px] font-bold leading-4 ${
-                                    BALANCE_TONE[balance.level]
+                                    OUTLOOK_TONE[outlook.level]
                                   }`}
                                 >
-                                  {balance.symbols}
+                                  {outlook.symbols}
                                 </span>
                               )}
                             </span>
@@ -844,6 +857,18 @@ export default function TournamentView({
                                 playersById={playersById}
                                 align="left"
                               />
+                              {/* Средняя колонка здесь та же, что у счёта, —
+                                  обе стоят между двумя равными половинами,
+                                  поэтому ожидаемый счёт оказывается ровно под
+                                  фактическим, и сравнивать их можно взглядом. */}
+                              <span className="shrink-0 text-center">
+                                <span className="block text-[10px] uppercase tracking-wide">
+                                  ждали
+                                </span>
+                                <span className="block font-semibold tabular-nums text-text">
+                                  {rating.outlook.score[0]} : {rating.outlook.score[1]}
+                                </span>
+                              </span>
                               <TeamRatingBlock
                                 team={rating.teamB}
                                 playersById={playersById}
@@ -922,11 +947,13 @@ export default function TournamentView({
             </p>
           )}
 
-          {balances.size > 0 && (
+          {ratingByMatch.size > 0 && (
             <p className="text-xs leading-relaxed text-muted">
-              Знак под счётом — насколько равны были команды. Считается по остальным матчам
-              игроков, поэтому от результата самой встречи не зависит: острие смотрит на команду
-              послабее, а чем больше символов, тем крупнее перекос. «=» — команды были равны.
+              Знак под счётом — насколько равны были пары по клубному рейтингу перед матчем:
+              острие смотрит на пару послабее, а чем больше символов, тем крупнее перекос. «=» —
+              пары были равны. «Ждали» — счёт, которого рейтинг при таком раскладе и ждал: сыграть
+              ровно так значило бы остаться при своём. Разошёлся счёт с ожидаемым больше чем на{' '}
+              {points(SURPRISE_POINTS)} — матч помечен как неожиданный.
             </p>
           )}
 

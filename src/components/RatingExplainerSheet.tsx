@@ -6,6 +6,7 @@ import {
   CALIBRATION_MATCHES,
   expectedShare,
   matchRatings,
+  parScore,
   RATING_TIERS,
   START_RATING,
   type Rating,
@@ -51,9 +52,8 @@ function delta(
 }
 
 /** Счёт, который шкала считает ожидаемым при таком разрыве рейтингов. */
-function parScore(gap: number): [number, number] {
-  const forA = Math.round(expectedShare(START_RATING + gap, START_RATING) * POINTS);
-  return [forA, POINTS - forA];
+function parAt(gap: number): [number, number] {
+  return parScore(expectedShare(START_RATING + gap, START_RATING), POINTS);
 }
 
 function signed(value: number): string {
@@ -172,7 +172,7 @@ export default function RatingExplainerSheet({ onClose }: { onClose: () => void 
               <span>Ждут счёта</span>
             </li>
             {GAPS.map((gap) => {
-              const [forA, against] = parScore(gap);
+              const [forA, against] = parAt(gap);
               return (
                 <li
                   key={gap}
