@@ -1,6 +1,35 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tournamentSize, upcomingRounds } from '../src/lib/formats.ts';
+import { awaitsScore, tournamentSize, upcomingRounds } from '../src/lib/formats.ts';
+import type { Match } from '../src/lib/types.ts';
+
+function match(over: Partial<Match> = {}): Match {
+  return {
+    id: 'm1',
+    round: 1,
+    court: 1,
+    team1: ['a', 'b'],
+    team2: ['c', 'd'],
+    score1: null,
+    score2: null,
+    skipped: false,
+    ...over,
+  };
+}
+
+test('раунд ждёт матч без счёта, но не пропущенный', () => {
+  assert.equal(awaitsScore(match()), true);
+  assert.equal(awaitsScore(match({ score1: 10, score2: 6 })), false);
+  // Ради этого отметка и заводилась: пропущенный матч не держит раунд, и
+  // следующий собирается, хотя счёта здесь по-прежнему нет.
+  assert.equal(awaitsScore(match({ skipped: true })), false);
+});
+
+test('внесённый счёт закрывает вопрос независимо от отметки', () => {
+  // Такого состояния база не допускает (CHECK matches_skipped_unplayed), но
+  // правило не должно зависеть от того, кто и в каком порядке снял отметку.
+  assert.equal(awaitsScore(match({ score1: 8, score2: 8, skipped: true })), false);
+});
 
 test('у американо расписание известно целиком — впереди ничего не висит', () => {
   assert.deepEqual(upcomingRounds('americano', 8, 2, null, 0), []);

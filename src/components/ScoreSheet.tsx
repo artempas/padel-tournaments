@@ -11,6 +11,11 @@ interface Props {
    *  закрывается тем же кликом, каким уходит запрос. */
   onSave: (score1: number, score2: number) => void;
   onClear: () => void;
+  /**
+   * Отложить матч на потом или вернуть отложенный. `null` — этому смотрящему
+   * такое не разрешено или формату не нужно (см. `setMatchSkipped`).
+   */
+  onSkip: ((skipped: boolean) => void) | null;
   onClose: () => void;
 }
 
@@ -24,6 +29,7 @@ export default function ScoreSheet({
   pointsPerMatch,
   onSave,
   onClear,
+  onSkip,
   onClose,
 }: Props) {
   // Only the first team's score is state — the second is whatever is left of
@@ -72,6 +78,15 @@ export default function ScoreSheet({
           </button>
         </div>
         <p className="mb-5 text-sm text-muted">Матч играется до {pointsPerMatch} очков на двоих.</p>
+
+        {/* Отложенный матч выглядит как обычный несыгранный, и без этой строки
+            непонятно, почему следующий раунд уже собран. */}
+        {match.skipped && (
+          <p className="mb-5 rounded-xl border border-line bg-ink px-4 py-3 text-sm text-muted">
+            Матч пропущен — следующий раунд собрался без него. Внесите счёт, когда его доиграют:
+            в таблицу он попадёт наравне с остальными.
+          </p>
+        )}
 
         <div className="flex flex-col gap-3">
           {sides.map((side) => (
@@ -148,7 +163,26 @@ export default function ScoreSheet({
               Сбросить результат
             </button>
           )}
+          {/* Пропуск предлагается только тому, кто вправе его поставить, и
+              только у матча без счёта: со счётом матч уже сыгран, откладывать
+              нечего. */}
+          {onSkip && match.score1 === null && (
+            <button
+              type="button"
+              onClick={() => onSkip(!match.skipped)}
+              className="tap rounded-xl border border-line px-4 font-medium text-muted"
+            >
+              {match.skipped ? 'Вернуть матч в очередь' : 'Пропустить матч'}
+            </button>
+          )}
         </div>
+
+        {onSkip && !match.skipped && match.score1 === null && (
+          <p className="mt-2 text-xs leading-relaxed text-muted">
+            Пропуск не отменяет матч: следующий раунд соберётся без него, а счёт можно внести
+            позже — турнир не считается доигранным, пока такой матч без счёта.
+          </p>
+        )}
       </div>
     </div>
   );

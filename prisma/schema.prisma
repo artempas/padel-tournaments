@@ -407,6 +407,14 @@ model Match {
   scoreB   Int?      @map("score_b") @db.SmallInt
   playedAt DateTime? @map("played_at") @db.Timestamptz(6)
 
+  // Матч, к которому вернутся позже. Раунд мексикано собирается по таблице и
+  // не может ждать одну четвёрку — её матч откладывается, а не отменяется:
+  // счёт в него вносят, когда доиграют, и он попадает в таблицу как любой
+  // другой. Метка времени, а не флаг, — по той же причине, что у completed_at.
+  //
+  // Что счёт и отметка не стоят разом, следит CHECK matches_skipped_unplayed.
+  skippedAt DateTime? @map("skipped_at") @db.Timestamptz(6)
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tournament   Tournament         @relation(fields: [tournamentId], references: [id], onDelete: Cascade)

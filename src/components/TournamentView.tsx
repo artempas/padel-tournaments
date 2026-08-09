@@ -8,7 +8,7 @@ import InsightCards from './InsightCards';
 import ScoreSheet from './ScoreSheet';
 import ShareResultsSheet from './ShareResultsSheet';
 import ThemeToggle from './ThemeToggle';
-import { formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
+import { awaitsScore, formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
 import {
   balanceContext,
   balanceSummary,
@@ -314,8 +314,12 @@ export default function TournamentView({
   // "Early" only while something is genuinely left unplayed — an organiser who
   // closes early and then plays the rest ends up with an ordinary finish.
   const finishedEarly = isFinished && remaining > 0;
-  const currentRound =
-    rounds.find(([, matches]) => matches.some((m) => m.score1 === null))?.[0] ?? null;
+  // Текущий — первый раунд, который ещё чего-то ждёт. Пропущенный матч его не
+  // держит: сервер собирает следующий раунд по тому же правилу (`awaitsScore`),
+  // и подсветка не должна обещать другого.
+  const currentRound = rounds.find(([, matches]) => matches.some(awaitsScore))?.[0] ?? null;
+  // Отложенные матчи — долг турнира: он не доигран, пока они без счёта.
+  const skippedCount = tournament.matches.filter((m) => m.skipped).length;
 
   // Итоги подводятся у завершённого турнира: на середине факты меняются каждый
   // раунд, а «камбэк» и «лидер до конца» ещё ничего не значат.
@@ -369,6 +373,12 @@ export default function TournamentView({
   const extra = Math.min(extraRounds, maxExtra);
 
   const editing = editingId ? (tournament.matches.find((m) => m.id === editingId) ?? null) : null;
+
+  // Пропуск нужен там, где раунд ждёт предыдущего, — то есть у мексикано и
+  // только пока турнир идёт. Право админское: счёт это про один корт, а пропуск
+  // двигает весь турнир. Те же три условия проверяет сервер.
+  const maySkip =
+    can(role, 'match:skip') && tournament.format === 'mexicano' && !isFinished;
 
   // Картинку пересобирать на каждый рендер незачем — шторка рисует её по этому
   // объекту, поэтому он должен меняться только вместе с результатами.
@@ -459,6 +469,39 @@ export default function TournamentView({
       },
       message: 'Не удалось изменить статус турнира',
       offline: 'Нет сети — статус турнира можно изменить только со связью',
+    });
+  }
+
+  /**
+   * Отложить матч или вернуть его в очередь.
+   *
+   * В очередь неотправленного это, как и завершение, не попадает: пропуск
+   * нужен затем, чтобы сервер собрал следующий раунд, а сделать это без связи
+   * он всё равно не сможет. Зато сама отметка видна сразу — вместе с тем, что
+   * раунд считается доигранным.
+   */
+  function skipMatch(matchId: string, skipped: boolean) {
+    const tournamentId = server.id;
+    const mark = (t: TournamentDetail, value: boolean): TournamentDetail => ({
+      ...t,
+      matches: t.matches.map((m) => (m.id === matchId ? { ...m, skipped: value } : m)),
+    });
+
+    setEditingId(null);
+
+    mutate({
+      next: (t) => mark(t, skipped),
+      undo: (t) => mark(t, !skipped),
+      send: async () => {
+        const data = await request<{ tournament: TournamentDetail }>(
+          `/api/tournaments/${tournamentId}/matches/${matchId}`,
+          { method: 'PATCH', body: JSON.stringify({ skipped }) },
+        );
+        router.refresh();
+        return data.tournament;
+      },
+      message: skipped ? 'Не удалось пропустить матч' : 'Не удалось вернуть матч в очередь',
+      offline: 'Нет сети — следующий раунд собирает сервер, нужна связь',
     });
   }
 
@@ -701,7 +744,11 @@ export default function TournamentView({
                     const rating = ratingByMatch.get(match.id) ?? null;
 
                     const summary =
-                      (played ? `счёт ${match.score1}:${match.score2}` : 'счёт не внесён') +
+                      (played
+                        ? `счёт ${match.score1}:${match.score2}`
+                        : match.skipped
+                          ? 'матч пропущен, счёт можно внести позже'
+                          : 'счёт не внесён') +
                       (unsent ? ', ещё не отправлен' : '') +
                       (balance
                         ? `. ${balanceSummary(
@@ -724,7 +771,11 @@ export default function TournamentView({
                             `${teamName(match.team2, playersById)}, ${summary}`
                           }
                           className={`card w-full p-3 text-left transition active:scale-[0.99] ${
-                            isCurrent && !played ? 'border-accent/50' : ''
+                            match.skipped
+                              ? 'border-dashed'
+                              : isCurrent && !played
+                                ? 'border-accent/50'
+                                : ''
                           }`}
                         >
                           <div className="mb-2 flex items-center justify-between">
@@ -733,6 +784,12 @@ export default function TournamentView({
                             </span>
                             {unsent ? (
                               <span className="text-xs font-medium text-warn">не отправлено</span>
+                            ) : match.skipped ? (
+                              /* Пропущенный матч ждёт счёта, просто не держит
+                                 раунд, — и выглядеть должен именно так. */
+                              <span className="text-xs font-medium text-muted">
+                                пропущен · счёт позже
+                              </span>
                             ) : (
                               !played && (
                                 <span className="text-xs font-medium text-accent">Внести счёт</span>
@@ -845,10 +902,25 @@ export default function TournamentView({
                     ? `Составы соберутся по таблице, когда будут внесены счета всех матчей раунда ${currentRound}` +
                       (pending.length > 0 ? ' и уйдут на сервер.' : '.')
                     : 'Составы соберутся по таблице, когда результаты уйдут на сервер.'}
+                  {/* Тупик «одна четвёрка не может выйти на корт, и турнир
+                      стоит» стоит разомкнуть раньше, чем в него упрутся. */}
+                  {maySkip &&
+                    currentRound !== null &&
+                    ' Матч, который сейчас не сыграть, можно пропустить — раунд соберётся без' +
+                      ' него, а счёт внесёте позже.'}
                 </p>
               )}
             </section>
           ))}
+
+          {skippedCount > 0 && (
+            <p className="text-xs leading-relaxed text-muted">
+              {skippedCount === 1 ? 'Пропущен один матч' : `Пропущено матчей: ${skippedCount}`} —
+              раунд собрался без {skippedCount === 1 ? 'него' : 'них'}, но турнир останется
+              недоигранным, пока счёт не внесут. Откройте карточку такого матча, чтобы внести
+              счёт или вернуть матч в очередь.
+            </p>
+          )}
 
           {balances.size > 0 && (
             <p className="text-xs leading-relaxed text-muted">
@@ -1105,6 +1177,7 @@ export default function TournamentView({
           pointsPerMatch={tournament.pointsPerMatch}
           onSave={(s1, s2) => saveScore(editing.id, s1, s2)}
           onClear={() => saveScore(editing.id, null, null)}
+          onSkip={maySkip ? (skipped) => skipMatch(editing.id, skipped) : null}
           onClose={() => setEditingId(null)}
         />
       )}

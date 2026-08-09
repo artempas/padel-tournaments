@@ -130,6 +130,7 @@ erDiagram
         smallint score_a       "nullable"
         smallint score_b       "nullable"
         timestamptz played_at  "nullable"
+        timestamptz skipped_at "nullable, «вернёмся позже»"
         timestamptz created_at
     }
 
@@ -167,6 +168,7 @@ flowchart TB
         direction TB
         F["CHECK score_a IS NULL<br/>= score_b IS NULL"] --> F1["матч сыгран<br/>целиком или никак"]
         G["CHECK score_a + score_b<br/>= points_sum"] --> G1["сумма очков<br/>равна норме"]
+        K["CHECK skipped_at IS NULL<br/>OR score_a IS NULL"] --> K1["пропущенный матч<br/>ждёт счёта, а не имеет его"]
     end
 ```
 

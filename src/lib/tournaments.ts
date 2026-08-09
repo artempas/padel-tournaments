@@ -8,6 +8,7 @@ import {
   MIN_PLAYERS,
   type PlayedMatch,
 } from './americano';
+import { awaitsScore } from './formats';
 import {
   DEFAULT_ROUNDS,
   firstRound,
@@ -17,7 +18,7 @@ import {
   type RoundMatch,
 } from './mexicano';
 import { normalizeKey } from './normalize';
-import { canScore, isAtLeast, type ClubRole } from './permissions';
+import { can, canScore, isAtLeast, type ClubRole } from './permissions';
 import { prisma } from './prisma';
 import { START_RATING, type Rating } from './rating';
 import { ratingsForClub, upsertPeople } from './roster';
@@ -290,6 +291,7 @@ const BOARD_SELECT = {
       courtNo: true,
       scoreA: true,
       scoreB: true,
+      skippedAt: true,
       participants: { select: { tournamentPlayerId: true, side: true, slot: true } },
     },
     orderBy: [{ roundNo: 'asc' }, { courtNo: 'asc' }],
@@ -319,6 +321,7 @@ function readBoard(t: BoardRows): { players: Player[]; matches: Match[] } {
       team2: [seat('b', 1), seat('b', 2)],
       score1: m.scoreA,
       score2: m.scoreB,
+      skipped: m.skippedAt !== null,
     };
   });
 
@@ -473,7 +476,16 @@ export async function setMatchScore(
   await prisma.$transaction(async (tx) => {
     const updated = await tx.match.updateMany({
       where: { id: mid, tournamentId: tid },
-      data: { scoreA: score1, scoreB: score2, playedAt: clearing ? null : new Date() },
+      data: {
+        scoreA: score1,
+        scoreB: score2,
+        playedAt: clearing ? null : new Date(),
+        // Внесённый счёт — это и есть «вернулись к матчу»: отдельно снимать
+        // отметку не нужно, а CHECK matches_skipped_unplayed иначе и не дал бы
+        // её оставить. Сброс счёта возвращает матч в игру, а не в пропуск:
+        // пропустить его снова — отдельное решение организатора.
+        skippedAt: null,
+      },
     });
     if (updated.count === 0) throw new ApiError('Матч не найден', 404);
 
@@ -487,7 +499,78 @@ export async function setMatchScore(
 }
 
 /**
- * Достраивает следующий раунд mexicano, когда текущий доигран целиком.
+ * Пропустить матч — или вернуть пропущенный обратно в очередь на счёт.
+ *
+ * Зачем это нужно, видно только у мексикано: следующий раунд там собирается по
+ * таблице после текущего, поэтому четвёрка, которой прямо сейчас не выйти на
+ * корт (кто-то ушёл, корт занят, травма), держит весь турнир. Отметка снимает
+ * ровно это — и ничего больше: матч остаётся в расписании, счёт в него вносят
+ * позже обычным путём, и в таблицу он попадает наравне с остальными.
+ *
+ * У американо расписание известно целиком заранее, ждать там нечего, и
+ * несыгранный матч и так никому не мешает — отметке в этом формате взяться
+ * неоткуда.
+ *
+ * Право — админское, в отличие от счёта: счёт это про один корт, а пропуск
+ * двигает весь турнир. И только пока турнир идёт: у завершённого пропускать
+ * нечего, недоигранное в нём и так осталось без счёта.
+ */
+export async function setMatchSkipped(
+  tournamentId: string,
+  matchId: string,
+  actor: ScoreActor,
+  skipped: boolean,
+): Promise<TournamentDetail> {
+  const tid = parseUuid(tournamentId, 'Матч не найден');
+  const mid = parseUuid(matchId, 'Матч не найден');
+
+  if (!can(actor.role, 'match:skip')) {
+    throw new ApiError('Пропускать матчи могут администраторы клуба', 403);
+  }
+
+  const t = await prisma.tournament.findFirst({
+    where: { id: tid, clubId: actor.clubId },
+    select: { format: true, completedAt: true, closedAt: true },
+  });
+  if (!t) throw new ApiError('Турнир не найден', 404);
+
+  if (t.format !== 'mexicano') {
+    throw new ApiError('Пропустить матч можно только в мексикано');
+  }
+  if (t.completedAt !== null || t.closedAt !== null) {
+    throw new ApiError('Турнир завершён — пропускать в нём больше нечего');
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const match = await tx.match.findFirst({
+      where: { id: mid, tournamentId: tid },
+      select: { scoreA: true },
+    });
+    if (!match) throw new ApiError('Матч не найден', 404);
+
+    // То же самое говорит CHECK matches_skipped_unplayed — здесь проверка лишь
+    // затем, чтобы вместо 500 вернуть внятный текст.
+    if (skipped && match.scoreA !== null) {
+      throw new ApiError('В этом матче уже есть счёт — сначала сбросьте результат');
+    }
+
+    await tx.match.updateMany({
+      where: { id: mid, tournamentId: tid },
+      data: { skippedAt: skipped ? new Date() : null },
+    });
+
+    // Тот же порядок, что при внесении счёта: пропуск последнего матча раунда
+    // собирает следующий, и до этого момента недоигранных матчей нет.
+    await extendMexicano(tx, tid);
+    await refreshCompletion(tx, tid);
+  });
+
+  return loadTournament(tid, actor.clubId);
+}
+
+/**
+ * Достраивает следующий раунд mexicano, когда текущий доигран — то есть когда
+ * в нём не осталось матчей, которые ещё ждут счёта (пропущенные не в счёт).
  *
  * В этом и весь формат: пары следующего раунда — функция от таблицы, поэтому
  * раньше последнего результата их не существует. Отсюда же и то, чего здесь
@@ -518,7 +601,10 @@ async function extendMexicano(
   const lastRound = matches.reduce((max, m) => Math.max(max, m.round), 0);
 
   if (lastRound >= t.roundsPlanned) return;
-  if (matches.some((m) => m.round === lastRound && m.score1 === null)) return;
+  // Пропущенный матч раунд не держит — в этом весь смысл отметки: одна
+  // четвёрка, которой сейчас не выйти на корт, иначе остановила бы турнир
+  // целиком. В таблицу такой матч попадёт позже, вместе со счётом.
+  if (matches.some((m) => m.round === lastRound && awaitsScore(m))) return;
 
   // Тот же порядок, что видит организатор в таблице: пары следующего раунда
   // должны читаться прямо с экрана. Скамейка при этом считается по расписанию
@@ -543,6 +629,11 @@ async function extendMexicano(
  * A tournament is complete when every match has a score. `completed_at` keeps
  * the moment it first became so: the `completedAt: null` guard means correcting
  * a score afterwards does not move the timestamp.
+ *
+ * Пропущенный матч сюда не попадает: раунд он не держит, но счёта у него нет,
+ * значит турнир недоигран. Так и задумано — пропуск это «вернёмся позже», а не
+ * «этого матча не было». Не вернулись — организатор завершает турнир досрочно,
+ * и матч остаётся без счёта, как любой другой несыгранный.
  */
 async function refreshCompletion(tx: Prisma.TransactionClient, tournamentId: string): Promise<void> {
   const unplayed = await tx.match.count({ where: { tournamentId, scoreA: null } });

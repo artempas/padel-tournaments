@@ -39,7 +39,8 @@ export type ClubAction =
   | 'tournament:create'
   | 'tournament:delete'
   | 'tournament:close'
-  | 'tournament:extend';
+  | 'tournament:extend'
+  | 'match:skip';
 
 /**
  * Минимальная роль для каждого действия.
@@ -47,6 +48,10 @@ export type ClubAction =
  * Удаление турнира стоит особняком: администратор заводит турниры и может
  * завершить их досрочно, но не стереть. Досрочное завершение обратимо, а
  * удаление уносит с собой историю всех участников — это владелец.
+ *
+ * Пропуск матча — тоже админ, хотя счёт в своём матче участник вносит сам.
+ * Разница в том, кого касается: счёт — это про один корт, а пропуск двигает
+ * весь турнир, потому что следующий раунд мексикано собирается после текущего.
  */
 const FLOOR: Record<ClubAction, ClubRole> = {
   'club:edit': 'admin',
@@ -61,6 +66,7 @@ const FLOOR: Record<ClubAction, ClubRole> = {
   'tournament:delete': 'owner',
   'tournament:close': 'admin',
   'tournament:extend': 'admin',
+  'match:skip': 'admin',
 };
 
 export function can(role: ClubRole, action: ClubAction): boolean {

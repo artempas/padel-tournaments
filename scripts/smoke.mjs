@@ -510,6 +510,85 @@ try {
     assert.equal(mexListed.playedCount, 8);
   });
 
+  console.log('\nmexicano: пропущенный матч');
+  const skipMex = await api('/api/tournaments', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke Mexicano Skip',
+      players,
+      courts: 2,
+      pointsPerMatch: 16,
+      format: 'mexicano',
+      rounds: 2,
+    }),
+  });
+  const skipId = skipMex.body.id;
+  let skipDetail = (await api(`/api/tournaments/${skipId}`)).body.tournament;
+  const [held, alongside] = skipDetail.matches.filter((m) => m.round === 1);
+
+  const skipped = await api(`/api/tournaments/${skipId}/matches/${held.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ skipped: true }),
+  });
+  skipDetail = skipped.body.tournament;
+  check('a match can be skipped', () => {
+    assert.equal(skipped.status, 200);
+    assert.equal(skipDetail.matches.find((m) => m.id === held.id).skipped, true);
+  });
+  check('skipping one match does not build the round on its own', () =>
+    assert.equal(skipDetail.matches.filter((m) => m.round === 2).length, 0));
+
+  skipDetail = (
+    await api(`/api/tournaments/${skipId}/matches/${alongside.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ score1: 10, score2: 6 }),
+    })
+  ).body.tournament;
+  check('the round is built once the rest of it is scored', () =>
+    assert.equal(skipDetail.matches.filter((m) => m.round === 2).length, 2));
+
+  for (const m of skipDetail.matches.filter((r) => r.round === 2)) {
+    skipDetail = (
+      await api(`/api/tournaments/${skipId}/matches/${m.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ score1: 9, score2: 7 }),
+      })
+    ).body.tournament;
+  }
+  check('a skipped match keeps the tournament unfinished', () => {
+    assert.equal(skipDetail.status, 'running');
+    assert.equal(skipDetail.matches.find((m) => m.id === held.id).score1, null);
+  });
+
+  const skipScored = await api(`/api/tournaments/${skipId}/matches/${alongside.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ skipped: true }),
+  });
+  check('a match with a score cannot be skipped', () => assert.equal(skipScored.status, 400));
+
+  // Возвращаемся к отложенному матчу — ради этого отметка и заводилась.
+  skipDetail = (
+    await api(`/api/tournaments/${skipId}/matches/${held.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ score1: 12, score2: 4 }),
+    })
+  ).body.tournament;
+  check('scoring a skipped match takes the mark off and finishes the tournament', () => {
+    const back = skipDetail.matches.find((m) => m.id === held.id);
+    assert.equal(back.skipped, false);
+    assert.equal(back.score1, 12);
+    assert.equal(skipDetail.status, 'finished');
+    assert.equal(skipDetail.closedEarly, false);
+  });
+
+  const americanoMatch = (await api(`/api/tournaments/${id}`)).body.tournament.matches[0];
+  const skipAmericano = await api(`/api/tournaments/${id}/matches/${americanoMatch.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ skipped: true }),
+  });
+  check('americano has nothing to skip — its schedule is built in full', () =>
+    assert.equal(skipAmericano.status, 400));
+
   console.log('\nisolation');
   const stranger = await seedAccount(`${username}-other`);
   const foreign = await fetch(`${BASE}/api/tournaments/${id}`, {

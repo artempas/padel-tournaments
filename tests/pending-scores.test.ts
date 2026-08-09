@@ -12,6 +12,7 @@ function match(over: Partial<Match>): Match {
     team2: ['c', 'd'],
     score1: null,
     score2: null,
+    skipped: false,
     ...over,
   };
 }
@@ -119,6 +120,34 @@ test('clearing a score puts a finished tournament back in play', () => {
 
   assert.equal(result.status, 'running');
   assert.equal(result.finishedAt, null);
+});
+
+test('a queued score takes the skipped mark off its match', () => {
+  // Внести счёт в отложенный матч — это и значит «вернуться к нему», и видно
+  // это должно быть сразу, а не после ответа сервера (там же — setMatchScore).
+  const server = tournament({
+    format: 'mexicano',
+    roundsPlanned: 2,
+    matches: [match({ id: 'm1', skipped: true }), match({ id: 'm2', round: 2 })],
+  });
+  const result = applyPendingScores(server, [pending({ matchId: 'm1' })]);
+
+  assert.equal(result.matches[0].skipped, false);
+  assert.equal(result.matches[0].score1, 10);
+});
+
+test('a skipped match leaves the tournament unfinished', () => {
+  // Пропуск — это «вернёмся позже», а не «матча не было»: счёта у него нет,
+  // значит турнир недоигран. Тот же ответ даёт сервер в refreshCompletion.
+  const server = tournament({
+    format: 'mexicano',
+    roundsPlanned: 2,
+    matches: [match({ id: 'm1', skipped: true }), match({ id: 'm2', round: 2 })],
+  });
+  const result = applyPendingScores(server, [pending({ matchId: 'm2' })]);
+
+  assert.equal(result.matches[0].skipped, true, 'чужой счёт отметку не трогает');
+  assert.equal(result.status, 'running');
 });
 
 test('a tournament closed by hand stays finished with matches left unplayed', () => {

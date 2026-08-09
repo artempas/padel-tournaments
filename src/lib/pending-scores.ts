@@ -21,6 +21,9 @@ export interface PendingScore {
  *
  * Матчи передаются отдельно, потому что решение принимается по состоянию на
  * экране — с наложенной очередью, — а не по тому, что подтвердил сервер.
+ *
+ * Пропущенный матч турнир не доигрывает: счёта у него нет, и здесь он такой же
+ * несыгранный, как любой другой, — то же правило, что у `refreshCompletion`.
  */
 export function isComplete(
   tournament: Pick<TournamentDetail, 'roundsPlanned'>,
@@ -56,7 +59,10 @@ export function applyPendingScores(
 
   const matches = tournament.matches.map((match) => {
     const entry = byMatch.get(match.id);
-    return entry ? { ...match, score1: entry.score1, score2: entry.score2 } : match;
+    // Счёт снимает отметку «пропущен» — ровно как на сервере (setMatchScore).
+    // Внести счёт в отложенный матч и есть «вернуться к нему», и ждать ответа,
+    // чтобы это увидеть, незачем.
+    return entry ? { ...match, score1: entry.score1, score2: entry.score2, skipped: false } : match;
   });
 
   const done = tournament.closedEarly || isComplete(tournament, matches);

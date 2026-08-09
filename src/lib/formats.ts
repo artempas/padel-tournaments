@@ -1,6 +1,6 @@
 import { totalMatchesFor } from './americano.ts';
 import { matchesPerRound } from './mexicano.ts';
-import type { PlayableFormat, TournamentFormat } from './types';
+import type { Match, PlayableFormat, TournamentFormat } from './types';
 
 export interface FormatOption {
   value: PlayableFormat;
@@ -23,6 +23,22 @@ export const FORMAT_OPTIONS: FormatOption[] = [
 
 export function formatLabel(format: TournamentFormat): string {
   return FORMAT_OPTIONS.find((o) => o.value === format)?.label ?? format;
+}
+
+/**
+ * Матч, которого раунд ещё ждёт: без счёта и не пропущенный.
+ *
+ * Отсюда следует, доигран ли раунд, — а у мексикано это ровно тот вопрос,
+ * после которого собирается следующий. Правило одно на сервер и на клиент
+ * (`extendMexicano` и подсветка текущего раунда), потому что расходиться им
+ * нельзя: экран обещает составы там, где их соберёт сервер.
+ *
+ * Пропущенный матч раунд не держит, но и сыгранным не становится: счёта у него
+ * по-прежнему нет, и турнир останется недоигранным, пока счёт не внесут или
+ * организатор не завершит турнир досрочно.
+ */
+export function awaitsScore(match: Match): boolean {
+  return match.score1 === null && !match.skipped;
 }
 
 /**

@@ -27,6 +27,7 @@ function match(round: number, team1: [string, string], score1: number, team2: [s
     team2,
     score1,
     score2: 24 - score1,
+    skipped: false,
   };
 }
 

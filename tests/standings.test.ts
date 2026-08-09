@@ -21,6 +21,7 @@ function match(over: Partial<Match>): Match {
     team2: ['c', 'd'],
     score1: null,
     score2: null,
+    skipped: false,
     ...over,
   };
 }

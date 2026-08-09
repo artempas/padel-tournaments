@@ -17,12 +17,16 @@ test('участник только смотрит', () => {
   assert.equal(can('member', 'tournament:extend'), false);
   assert.equal(can('member', 'member:invite'), false);
   assert.equal(can('member', 'roster:archive'), false);
+  // Счёт своего матча участник вносит сам, а вот пропуск двигает весь турнир:
+  // следующий раунд мексикано собирается после текущего.
+  assert.equal(can('member', 'match:skip'), false);
 });
 
 test('администратор ведёт турниры, но не стирает их', () => {
   assert.equal(can('admin', 'tournament:create'), true);
   assert.equal(can('admin', 'tournament:close'), true);
   assert.equal(can('admin', 'tournament:extend'), true);
+  assert.equal(can('admin', 'match:skip'), true);
   assert.equal(can('admin', 'member:invite'), true);
   // Досрочное завершение обратимо, удаление — нет.
   assert.equal(can('admin', 'tournament:delete'), false);
@@ -41,6 +45,7 @@ test('владелец может всё', () => {
     'tournament:delete',
     'tournament:close',
     'tournament:extend',
+    'match:skip',
   ] as const;
 
   for (const action of actions) {
