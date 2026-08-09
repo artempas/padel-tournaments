@@ -82,10 +82,21 @@ export interface MatchRating {
  * это семь матчей) находит своё место, ветеран не скачет от одного неудачного
  * турнира.
  */
-function kFactor(matches: number): number {
+export function kFactor(matches: number): number {
   if (matches < CALIBRATION_MATCHES) return 18;
   if (matches < 30) return 14;
   return 11;
+}
+
+/**
+ * Какую долю очков пара `ratingA` должна взять у пары `ratingB`. Ровно это
+ * рейтинг и считает ожидаемым: 0.625 значит «должны выиграть 10:6».
+ *
+ * Наружу — чтобы экран «как работает рейтинг» строил примеры этой же функцией,
+ * а не пересказывал формулу своими числами. Пересказ однажды разошёлся бы.
+ */
+export function expectedShare(ratingA: number, ratingB: number): number {
+  return 1 / (1 + 10 ** ((ratingB - ratingA) / SCALE));
 }
 
 /**
@@ -152,7 +163,7 @@ function* replay(
     const ratingA = (beforeA[0] + beforeA[1]) / 2;
     const ratingB = (beforeB[0] + beforeB[1]) / 2;
 
-    const expected = 1 / (1 + 10 ** ((ratingB - ratingA) / SCALE));
+    const expected = expectedShare(ratingA, ratingB);
     const surplus = match.scoreA / total - expected;
 
     // Все четыре дельты считаются от рейтингов до матча, поэтому порядок

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   CALIBRATION_MATCHES,
   computeRatings,
+  expectedShare,
+  kFactor,
   matchRatings,
   RATING_TIERS,
   ratingHistory,
@@ -375,4 +377,57 @@ test('ступени идут сверху вниз и покрывают шка
   const rest = floors.slice(0, -1) as number[];
   assert.deepEqual(rest, [...rest].sort((a, b) => b - a));
   assert.equal(new Set(RATING_TIERS.map((t) => t.id)).size, RATING_TIERS.length);
+});
+
+// ---- Ожидание: то, на чём стоит экран «как работает рейтинг» --------------
+
+test('равным парам ожидание ровно половина', () => {
+  assert.equal(expectedShare(100, 100), 0.5);
+  assert.equal(expectedShare(37, 37), 0.5);
+});
+
+test('ожидание симметрично: чей выигрыш, того и разрыв', () => {
+  for (const gap of [10, 40, 86, 200]) {
+    assert.ok(Math.abs(expectedShare(100 + gap, 100) + expectedShare(100, 100 + gap) - 1) < 1e-12);
+  }
+});
+
+test('разрыв превращается в ожидаемый счёт так, как обещает экран', () => {
+  // Эти пары чисел человек читает в объяснении рейтинга; если шкала поедет,
+  // объяснение начнёт врать молча — поэтому они закреплены здесь.
+  const par = (gap: number) => Math.round(expectedShare(100 + gap, 100) * 16);
+
+  assert.deepEqual(
+    [0, 20, 40, 60, 86].map(par),
+    [8, 9, 10, 11, 12],
+  );
+});
+
+test('матч ровно по ожиданию не двигает рейтинг', () => {
+  // Разрыв 40 — это ожидание 10:6. Значит именно такой счёт стоит нуля.
+  const [snapshot] = matchRatings(
+    [{ teamA: ['a', 'b'], teamB: ['c', 'd'], scoreA: 10, scoreB: 6 }],
+    seeded({ a: 140, b: 140, c: 100, d: 100 }),
+  );
+
+  assert.equal(snapshot!.teamA.players[0].delta, 0);
+  assert.equal(snapshot!.teamB.players[0].delta, 0);
+});
+
+test('победа слабее ожидаемой стоит рейтинга', () => {
+  // Тот же расклад, но 9:7 — победа, которая уводит фаворита в минус.
+  const [snapshot] = matchRatings(
+    [{ teamA: ['a', 'b'], teamB: ['c', 'd'], scoreA: 9, scoreB: 7 }],
+    seeded({ a: 140, b: 140, c: 100, d: 100 }),
+  );
+
+  assert.ok(snapshot!.teamA.players[0].delta < 0);
+  assert.ok(snapshot!.teamB.players[0].delta > 0);
+});
+
+test('шаг падает с опытом и дальше держится', () => {
+  const steps = [0, CALIBRATION_MATCHES, 30, 300].map(kFactor);
+
+  assert.deepEqual(steps, [...steps].sort((a, b) => b - a));
+  assert.equal(steps[2], steps[3], 'после тридцати матчей шаг больше не меняется');
 });

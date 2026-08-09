@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import RatingChart from './RatingChart';
+import RatingExplainerSheet from './RatingExplainerSheet';
 import ThemeToggle from './ThemeToggle';
 import { TierIcon, TierSprite, tierColor } from './TierIcon';
 import { plural } from '@/lib/plural';
@@ -53,6 +54,7 @@ export default function PlayerProfileView({
   const [selected, setSelected] = useState<string | null>(
     history[history.length - 1]?.tournamentId ?? null,
   );
+  const [explaining, setExplaining] = useState(false);
   const row = useRef<HTMLLIElement>(null);
 
   // Выбор с графика попадает в список, который может быть ниже экрана: без
@@ -136,11 +138,22 @@ export default function PlayerProfileView({
       </div>
 
       {player.matches > 0 && (
-        <p className="mb-4 text-sm text-muted">
+        <p className="mb-3 text-sm text-muted">
           {rank}-е место по рейтингу из {total} · {player.tournaments}{' '}
           {plural(player.tournaments, 'турнир', 'турнира', 'турниров')}
         </p>
       )}
+
+      {/* Под карточкой с числом: вопрос «почему столько» возникает именно
+          здесь, а не в конце страницы. */}
+      <button
+        type="button"
+        onClick={() => setExplaining(true)}
+        className="tap mb-4 flex w-full items-center justify-center gap-2 rounded-xl border border-line px-4 text-sm font-semibold text-muted"
+      >
+        <span aria-hidden="true">?</span>
+        Как работает рейтинг
+      </button>
 
       {history.length > 0 ? (
         <section className="card mb-4 px-2 pb-2 pt-3">
@@ -244,6 +257,8 @@ export default function PlayerProfileView({
         пересчитывает и кривую. Всё считается по турнирам клуба «{clubName}»: тот
         же человек в другом клубе — другой игрок со своим счётом.
       </p>
+
+      {explaining && <RatingExplainerSheet onClose={() => setExplaining(false)} />}
     </main>
   );
 }
