@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import DynamicsChart from './DynamicsChart';
@@ -14,7 +14,12 @@ import { MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
 import { can, canScore, type ClubRole } from '@/lib/permissions';
 import { flushQueue, queueScore, readQueue } from '@/lib/offline';
 import { useOptimisticState } from '@/lib/optimistic';
-import { applyPendingScores, isComplete, type PendingScore } from '@/lib/pending-scores';
+import {
+  applyPendingScores,
+  changedMatches,
+  isComplete,
+  type PendingScore,
+} from '@/lib/pending-scores';
 import { plural } from '@/lib/plural';
 import { failureMessage, request } from '@/lib/request';
 import type { ResultsCardData } from '@/lib/results-card';
@@ -28,6 +33,7 @@ import {
   type TeamRating,
 } from '@/lib/rating';
 import { computeStandings, restingInRound } from '@/lib/standings';
+import { useLiveTournament } from '@/lib/use-live-tournament';
 import type { Match, Player, TournamentDetail } from '@/lib/types';
 
 type Tab = 'matches' | 'table' | 'dynamics';
@@ -47,6 +53,9 @@ function teamName(ids: [string, string], playersById: Map<string, Player>): stri
  * Цвет чипа по силе перекоса: зелёный — команды равны, жёлтый — перекос
  * заметен, красный — матч был неравным. Индекс — это `MatchOutlook.level`.
  */
+/** Сколько держится подсветка чужого результата. */
+const FLASH_MS = 2500;
+
 const OUTLOOK_TONE = [
   'bg-accent/10 text-accent',
   'bg-warn/15 text-warn',
@@ -129,6 +138,22 @@ function ratingSummary(rating: MatchRating, playersById: Map<string, Player>): s
   return `Рейтинг на конец матча: ${side(rating.teamA)}; ${side(rating.teamB)}`;
 }
 
+/**
+ * Изменившийся матч словами — для `aria-live`.
+ *
+ * Корт, а не раунд с кортом: раунд на экране и так рядом, а сказать нужно
+ * коротко, потому что читается это поверх того, что человек делает сейчас.
+ */
+function matchNote(match: Match): string {
+  const what = match.skipped
+    ? 'матч отложен'
+    : match.score1 === null || match.score2 === null
+      ? 'счёт сброшен'
+      : `счёт ${match.score1}:${match.score2}`;
+
+  return `Корт ${match.court}: ${what}`;
+}
+
 export default function TournamentView({
   initial,
   role,
@@ -147,6 +172,7 @@ export default function TournamentView({
   const {
     value: server,
     error,
+    unconfirmed,
     mutate,
     set: setServer,
     setError,
@@ -161,6 +187,10 @@ export default function TournamentView({
   const [sharing, setSharing] = useState(false);
   const [extending, setExtending] = useState(false);
   const [extraRounds, setExtraRounds] = useState(2);
+  /** Матчи, счёт в которых изменил не этот телефон, — на пару секунд. */
+  const [flashed, setFlashed] = useState<ReadonlySet<string>>(() => new Set());
+  /** То же самое словами: подсветки для screen reader не существует. */
+  const [liveNote, setLiveNote] = useState('');
 
   const tournament = useMemo(() => applyPendingScores(server, pending), [server, pending]);
   const pendingIds = useMemo(() => new Set(pending.map((p) => p.matchId)), [pending]);
@@ -199,6 +229,70 @@ export default function TournamentView({
       setSyncing(false);
     }
   }, [initial.id, router, setServer, setError]);
+
+  // Снимок сравнивается с тем, что на экране сейчас, а решение об этом
+  // принимается вне рендера — отсюда ref.
+  const serverRef = useRef(server);
+  serverRef.current = server;
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /**
+   * Чужой результат на экране.
+   *
+   * Подсвечивается то, что изменилось между снимками, а не всё сыгранное:
+   * иначе живое обновление подменяло бы числа исподтишка — счёт на карточке
+   * молча стал бы другим, и заметить это можно было бы только случайно. Свой
+   * собственный счёт при этом не подсвечивается сам собой: к моменту, когда
+   * эхо-снимок доедет, `sync` уже положил его в `server`, и разницы нет.
+   *
+   * `router.refresh()` здесь нет намеренно, в отличие от `sync` и мутаций. Там
+   * он обновляет список турниров после своего действия, однократно; здесь это
+   * был бы RSC-запрос на каждый телефон на каждый внесённый счёт — при пуле на
+   * десять соединений. Данные кадр и так принёс целиком.
+   */
+  const applySnapshot = useCallback(
+    (next: TournamentDetail) => {
+      const changed = changedMatches(serverRef.current, next);
+      serverRef.current = next;
+      setServer(next);
+      if (changed.length === 0) return;
+
+      setFlashed(new Set(changed.map((m) => m.id)));
+      setLiveNote(changed.map(matchNote).join('; '));
+
+      if (flashTimer.current !== null) clearTimeout(flashTimer.current);
+      flashTimer.current = setTimeout(() => {
+        flashTimer.current = null;
+        setFlashed(new Set());
+        setLiveNote('');
+      }, FLASH_MS);
+    },
+    [setServer],
+  );
+
+  useEffect(
+    () => () => {
+      if (flashTimer.current !== null) clearTimeout(flashTimer.current);
+    },
+    [],
+  );
+
+  /**
+   * Пока `busy`, чужой снимок ждёт: он мог быть собран до того, как
+   * зафиксировалась собственная правка, и применить его значило бы мигнуть
+   * ровно тем числом, которое человек только что набрал.
+   *
+   * Слагаемых два, и оба несущие: `unconfirmed` закрывает всё, что идёт через
+   * `mutate`, а `syncing` — ввод счёта, который через `mutate` не идёт вовсе.
+   * Очереди неотправленного в этом списке нет намеренно: её накладывает
+   * `applyPendingScores` поверх любого снимка, а с ней телефон с застрявшей
+   * очередью больше никогда не увидел бы чужих результатов.
+   */
+  useLiveTournament({
+    tournamentId: initial.id,
+    busy: unconfirmed > 0 || syncing,
+    onSnapshot: applySnapshot,
+  });
 
   // Scores left over from a previous visit — the tab may have been closed with
   // no connection — are shown at once and sent as soon as there is one.
@@ -706,6 +800,13 @@ export default function TournamentView({
         </p>
       )}
 
+      {/* Чужой результат приезжает сам, и подсветка о нём сообщает только
+          глазами. Эта строка говорит то же вслух — и только о том, что
+          изменилось, а не обо всём экране. */}
+      <p aria-live="polite" className="sr-only">
+        {liveNote}
+      </p>
+
       {activeTab === 'matches' ? (
         <div className="flex flex-col gap-6">
           {/* Карточка чужого матча не нажимается, и молчащая кнопка выглядит
@@ -779,7 +880,7 @@ export default function TournamentView({
                               : isCurrent && !played
                                 ? 'border-accent/50'
                                 : ''
-                          }`}
+                          } ${flashed.has(match.id) ? 'flash' : ''}`}
                         >
                           <div className="mb-2 flex items-center justify-between">
                             <span className="rounded-md bg-court/20 px-2 py-0.5 text-[11px] font-semibold text-court">

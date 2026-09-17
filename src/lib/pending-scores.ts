@@ -74,3 +74,27 @@ export function applyPendingScores(
     finishedAt: done ? tournament.finishedAt : null,
   };
 }
+
+/**
+ * Матчи, результат которых изменился между двумя снимками сервера.
+ *
+ * Нужно ровно для одного: отметить на экране то, что изменил не этот телефон.
+ * Живое обновление иначе подменяло бы числа исподтишка — счёт на карточке молча
+ * стал бы другим, и заметить это можно было бы только случайно.
+ *
+ * Появившиеся матчи в счёт не идут: новый раунд мексикано — это не «обновился
+ * счёт», и подсвечивать в нём нечего. Возвращаются матчи из нового снимка, а не
+ * их идентификаторы: звонящему нужен и корт, и сами числа — сказать о смене
+ * словами (`aria-live`) подсветка не может.
+ */
+export function changedMatches(prev: TournamentDetail, next: TournamentDetail): Match[] {
+  const before = new Map(prev.matches.map((m) => [m.id, m]));
+
+  return next.matches.filter((match) => {
+    const was = before.get(match.id);
+    if (!was) return false;
+    return (
+      was.score1 !== match.score1 || was.score2 !== match.score2 || was.skipped !== match.skipped
+    );
+  });
+}

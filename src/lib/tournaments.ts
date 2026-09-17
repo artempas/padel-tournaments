@@ -9,6 +9,7 @@ import {
   type PlayedMatch,
 } from './americano';
 import { awaitsScore } from './formats';
+import { publishTournament } from './live';
 import {
   DEFAULT_ROUNDS,
   firstRound,
@@ -373,6 +374,29 @@ export async function loadTournament(id: string, clubId: string): Promise<Tourna
 }
 
 /**
+ * Свежий снимок турнира — и он же всем, кто держит его экран открытым.
+ *
+ * Рассылка стоит здесь, а не в роутах, по той же причине, по которой здесь
+ * стоят права: мутаторов четыре, роутов три, а отправитель счёта вообще не
+ * один — очередь неотправленного (`flushQueue`) ходит тем же PATCH. Правило
+ * «база изменилась — снимок ушёл» должно жить там, где меняется база, иначе его
+ * забудет первый же новый вызов. Лишних запросов это не стоит: снимок мутатор и
+ * так загрузил, чтобы его вернуть.
+ *
+ * `loadTournament` при этом остаётся чистым чтением: он же обслуживает
+ * страницу, GET и первый кадр самой ленты — рассылать оттуда значило бы
+ * рассылать на каждую загрузку страницы.
+ */
+async function publishedSnapshot(
+  tournamentId: string,
+  clubId: string,
+): Promise<TournamentDetail> {
+  const detail = await loadTournament(tournamentId, clubId);
+  publishTournament(detail);
+  return detail;
+}
+
+/**
  * Место человека в этом турнире, если он в нём играет.
  *
  * Матчи и таблица знают игроков только по `TournamentPlayer.id`, поэтому
@@ -495,7 +519,7 @@ export async function setMatchScore(
     await refreshCompletion(tx, tid);
   });
 
-  return loadTournament(tid, actor.clubId);
+  return publishedSnapshot(tid, actor.clubId);
 }
 
 /**
@@ -565,7 +589,7 @@ export async function setMatchSkipped(
     await refreshCompletion(tx, tid);
   });
 
-  return loadTournament(tid, actor.clubId);
+  return publishedSnapshot(tid, actor.clubId);
 }
 
 /**
@@ -742,7 +766,7 @@ export async function extendTournament(
     await refreshCompletion(tx, tid);
   });
 
-  return loadTournament(tid, clubId);
+  return publishedSnapshot(tid, clubId);
 }
 
 /**
@@ -770,5 +794,5 @@ export async function setTournamentClosed(
     });
   }
 
-  return loadTournament(tid, clubId);
+  return publishedSnapshot(tid, clubId);
 }

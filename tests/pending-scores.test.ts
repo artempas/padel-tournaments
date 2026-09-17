@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPendingScores, type PendingScore } from '../src/lib/pending-scores.ts';
+import {
+  applyPendingScores,
+  changedMatches,
+  type PendingScore,
+} from '../src/lib/pending-scores.ts';
 import type { Match, TournamentDetail } from '../src/lib/types.ts';
 
 function match(over: Partial<Match>): Match {
@@ -156,4 +160,46 @@ test('a tournament closed by hand stays finished with matches left unplayed', ()
 
   assert.equal(result.status, 'finished');
   assert.equal(result.matches[1].score1, null);
+});
+
+test('changedMatches находит матч с новым счётом', () => {
+  const before = tournament();
+  const after = tournament({
+    matches: [match({ id: 'm1', score1: 10, score2: 6 }), match({ id: 'm2', round: 2 })],
+  });
+
+  assert.deepEqual(
+    changedMatches(before, after).map((m) => m.id),
+    ['m1'],
+  );
+});
+
+test('changedMatches замечает и отметку «пропущен»', () => {
+  const before = tournament();
+  const after = tournament({
+    matches: [match({ id: 'm1', skipped: true }), match({ id: 'm2', round: 2 })],
+  });
+
+  assert.deepEqual(
+    changedMatches(before, after).map((m) => m.id),
+    ['m1'],
+  );
+});
+
+test('changedMatches ничего не находит в одинаковых снимках', () => {
+  assert.deepEqual(changedMatches(tournament(), tournament()), []);
+});
+
+test('changedMatches не считает изменением появившийся матч', () => {
+  // Следующий раунд мексикано — это не «обновился счёт», и подсвечивать в нём
+  // нечего.
+  const after = tournament({
+    matches: [
+      match({ id: 'm1' }),
+      match({ id: 'm2', round: 2 }),
+      match({ id: 'm3', round: 3, score1: 9, score2: 7 }),
+    ],
+  });
+
+  assert.deepEqual(changedMatches(tournament(), after), []);
 });
