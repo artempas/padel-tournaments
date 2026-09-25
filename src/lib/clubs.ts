@@ -104,6 +104,16 @@ export async function updateClub(clubId: string, input: UpdateClubInput): Promis
   });
 }
 
+/**
+ * Удаление клуба целиком: участники, ростер, турниры и приглашения уходят
+ * каскадом — на это и рассчитаны внешние ключи в схеме. Отложенные триггеры
+ * («ровно один владелец», «участник связан с игроком») сами пропускают клуб,
+ * которого больше нет, поэтому дополнительной зачистки перед DELETE не нужно.
+ */
+export async function deleteClub(clubId: string): Promise<void> {
+  await prisma.club.delete({ where: { id: clubId } });
+}
+
 export interface ClubMemberRow {
   userId: string;
   displayName: string;
