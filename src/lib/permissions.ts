@@ -32,6 +32,7 @@ export type ClubAction =
   | 'club:edit'
   | 'club:transfer'
   | 'club:leave'
+  | 'club:delete'
   | 'member:invite'
   | 'member:role'
   | 'member:remove'
@@ -58,6 +59,8 @@ const FLOOR: Record<ClubAction, ClubRole> = {
   'club:transfer': 'owner',
   // Владелец выйти не может: клуб остался бы без владельца. Сначала передать.
   'club:leave': 'member',
+  // Уносит клуб целиком со всеми турнирами — доступно только владельцу.
+  'club:delete': 'owner',
   'member:invite': 'admin',
   'member:role': 'admin',
   'member:remove': 'owner',

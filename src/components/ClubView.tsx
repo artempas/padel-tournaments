@@ -94,6 +94,7 @@ export default function ClubView({
   const [copied, setCopied] = useState(false);
   const [qrFailed, setQrFailed] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [transferTo, setTransferTo] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -181,6 +182,7 @@ export default function ClubView({
   const mayTransfer = can(role, 'club:transfer');
   const mayLeave = can(role, 'club:leave');
   const mayEdit = can(role, 'club:edit');
+  const mayDelete = can(role, 'club:delete');
 
   return (
     <main className="mx-auto w-full max-w-2xl px-4 pb-16 pt-6 sm:px-6">
@@ -541,7 +543,7 @@ export default function ClubView({
         </>
       )}
 
-      <div className="mt-6">
+      <div className="mt-6 flex flex-col gap-4">
         {mayLeave ? (
           confirmLeave ? (
             <div className="card p-4">
@@ -585,9 +587,50 @@ export default function ClubView({
         ) : (
           <p className="text-xs text-muted">
             Владелец не может выйти из клуба — сначала передайте его другому участнику на вкладке
-            «Участники».
+            «Участники», или удалите клуб целиком.
           </p>
         )}
+
+        {mayDelete &&
+          (confirmDelete ? (
+            <div className="card border-danger/40 p-4">
+              <p className="text-sm">
+                Удалить клуб «{club.name}» безвозвратно? Все турниры, ростер и история будут
+                стёрты, а остальные участники потеряют к нему доступ. Отменить это нельзя.
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    act(
+                      () => request(`/api/clubs/${club.id}`, { method: 'DELETE' }),
+                      'Не удалось удалить клуб',
+                      'home',
+                    )
+                  }
+                  className="tap flex-1 rounded-xl bg-danger px-4 text-sm font-bold text-ink disabled:opacity-40"
+                >
+                  Удалить клуб
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(false)}
+                  className="tap flex-1 rounded-xl border border-line px-4 text-sm font-medium text-muted"
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              className="text-sm text-danger underline underline-offset-2"
+            >
+              Удалить клуб
+            </button>
+          ))}
       </div>
     </main>
   );

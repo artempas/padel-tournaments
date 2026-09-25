@@ -37,6 +37,7 @@ test('владелец может всё', () => {
   const actions = [
     'club:edit',
     'club:transfer',
+    'club:delete',
     'member:invite',
     'member:role',
     'member:remove',
@@ -59,6 +60,12 @@ test('владелец не выходит из клуба, а передаёт 
   // Единственное действие, которое роль владельца запрещает: иначе клуб
   // остался бы без владельца, а триггер в базе этого не допускает.
   assert.equal(can('owner', 'club:leave'), false);
+});
+
+test('клуб удаляет только владелец', () => {
+  assert.equal(can('member', 'club:delete'), false);
+  assert.equal(can('admin', 'club:delete'), false);
+  assert.equal(can('owner', 'club:delete'), true);
 });
 
 test('счёт своего матча участник ведёт сам, пока турнир идёт', () => {
