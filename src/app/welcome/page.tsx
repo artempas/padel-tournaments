@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import SignupNameForm from '@/components/SignupNameForm';
 import { getCurrentUser } from '@/lib/auth';
 import { peekSignup } from '@/lib/oauth';
+import { ssoConfig } from '@/lib/sso';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,5 +22,6 @@ export default async function WelcomePage() {
   const pending = await peekSignup();
   if (!pending) redirect('/');
 
-  return <SignupNameForm suggestion={pending.suggestion} />;
+  const via = pending.provider === 'sso' ? (ssoConfig()?.name ?? 'SSO') : 'Яндекс ID';
+  return <SignupNameForm suggestion={pending.suggestion} via={via} />;
 }

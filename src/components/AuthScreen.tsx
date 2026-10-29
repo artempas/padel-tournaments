@@ -8,6 +8,7 @@ import {
   startRegistration,
 } from '@simplewebauthn/browser';
 import ThemeToggle from './ThemeToggle';
+import SsoButton from './SsoButton';
 import YandexButton from './YandexButton';
 import { failureMessage, request } from '@/lib/request';
 
@@ -22,6 +23,13 @@ function friendlyError(err: unknown): string {
   return failureMessage(err, 'Что-то пошло не так', 'Нет сети — вход требует связи с сервером');
 }
 
+function footnote(yandex: boolean, sso: string | undefined): string {
+  const others = [sso, yandex && 'Яндекс ID'].filter(Boolean).join(' или ');
+  return others
+    ? `Вход по passkey — отпечаток, Face ID или PIN устройства — либо через ${others}. Паролей нет.`
+    : 'Вход только по passkey — отпечаток, Face ID или PIN устройства. Паролей нет.';
+}
+
 function postJson<T>(url: string, body?: unknown): Promise<T> {
   return request<T>(url, { method: 'POST', body: JSON.stringify(body ?? {}) });
 }
@@ -30,6 +38,7 @@ export default function AuthScreen({
   next = '/tournaments',
   intro,
   yandex = false,
+  sso,
   notice,
 }: {
   /** Куда вести после входа: с ссылки-приглашения — обратно на неё. */
@@ -38,7 +47,9 @@ export default function AuthScreen({
   intro?: string;
   /** Подключён ли вход через Яндекс ID — решают переменные окружения. */
   yandex?: boolean;
-  /** Чем кончился прошлый поход на Яндекс, если он был. */
+  /** Имя SSO-провайдера, если вход через него подключён (SSO_*). */
+  sso?: string;
+  /** Чем кончился прошлый поход к внешнему провайдеру, если он был. */
   notice?: string;
 } = {}) {
   const router = useRouter();
@@ -103,8 +114,8 @@ export default function AuthScreen({
       </header>
 
       <div className="card p-5">
-        {/* Сообщение о прошлой попытке входа через Яндекс: приходит в адресе
-            после коллбэка и живёт до следующей навигации. */}
+        {/* Сообщение о прошлой попытке входа через Яндекс или SSO: приходит в
+            адресе после коллбэка и живёт до следующей навигации. */}
         {notice && (
           <p className="mb-5 rounded-xl border border-line bg-ink px-4 py-3 text-sm text-muted">
             {notice}
@@ -169,24 +180,26 @@ export default function AuthScreen({
           </button>
         </form>
 
-        {/* Кнопки нет, пока не заданы ключи приложения Яндекса: показывать
-            вход, который не работает, хуже, чем не показывать его вовсе. */}
-        {yandex && (
+        {/* Кнопки нет, пока не заданы ключи провайдера: показывать вход,
+            который не работает, хуже, чем не показывать его вовсе. SSO —
+            первым: раз его подключили, для своих он основной. */}
+        {(yandex || sso) && (
           <>
             <div className="my-4 flex items-center gap-3 text-xs text-muted">
               <span className="h-px flex-1 bg-line" />
               или
               <span className="h-px flex-1 bg-line" />
             </div>
-            <YandexButton next={next} />
+            <div className="flex flex-col gap-3">
+              {sso && <SsoButton name={sso} next={next} />}
+              {yandex && <YandexButton next={next} />}
+            </div>
           </>
         )}
       </div>
 
       <p className="text-center text-xs leading-relaxed text-muted">
-        {yandex
-          ? 'Вход по passkey — отпечаток, Face ID или PIN устройства — либо через Яндекс ID. Паролей нет.'
-          : 'Вход только по passkey — отпечаток, Face ID или PIN устройства. Паролей нет.'}
+        {footnote(yandex, sso)}
       </p>
     </main>
   );

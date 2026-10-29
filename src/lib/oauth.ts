@@ -1,19 +1,34 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { cookies } from 'next/headers';
+import type { OauthProvider } from '@/generated/prisma/enums';
 import { ApiError } from './api';
 import { CLUB_NAME_MAX } from './club-style';
 import { createClub } from './clubs';
 import { uniqueViolationOn } from './db-errors';
 import { normalizeKey } from './normalize';
 import { prisma } from './prisma';
-import { NAME_MAX, authorizeUrl, safeNext, type YandexConfig, type YandexIdentity } from './yandex';
+import * as sso from './sso';
+import { NAME_MAX, authorizeUrl, safeNext, type YandexConfig } from './yandex';
 
 /**
  * Вход через внешний сервис: рукопожатие и связь с аккаунтом приложения.
  *
- * Разделение с lib/yandex.ts проходит по границе «чужое — своё»: там разговор
- * с Яндексом, здесь наши куки, наши пользователи и наши клубы.
+ * Разделение с lib/yandex.ts и lib/sso.ts проходит по границе «чужое —
+ * своё»: там разговор с провайдером, здесь наши куки, наши пользователи и наши
+ * клубы. Поэтому всё ниже параметризовано провайдером и не знает, чем Яндекс
+ * отличается от authentik.
  */
+
+/**
+ * Человек, которого подтвердил провайдер. Облик общий: lib/yandex.ts и
+ * lib/sso.ts отдают ровно его, каждый из своего профиля.
+ */
+export interface OauthIdentity {
+  subject: string;
+  login: string;
+  email: string | null;
+  name: string;
+}
 
 export const OAUTH_COOKIE = 'padel_oauth';
 
@@ -21,19 +36,26 @@ export const OAUTH_COOKIE = 'padel_oauth';
 const HANDSHAKE_TTL_S = 600;
 
 /**
- * Зачем человек пошёл на Яндекс: войти или привязать Яндекс к аккаунту, в
- * который он уже вошёл.
+ * Зачем человек пошёл к провайдеру: войти или привязать провайдера к
+ * аккаунту, в который он уже вошёл.
  *
  * Намерение записывается в начале, а не выводится из наличия сессии в конце.
- * Разница видна, когда сессия истекла, пока человек был на Яндексе: выведи мы
- * намерение по сессии, привязка молча обернулась бы созданием второго
+ * Разница видна, когда сессия истекла, пока человек был у провайдера: выведи
+ * мы намерение по сессии, привязка молча обернулась бы созданием второго
  * аккаунта — а так это честная ошибка «войдите и повторите».
  */
 export type OauthIntent = 'login' | 'link';
 
 interface Handshake {
+  /**
+   * К кому ушли. Кука одна на всех провайдеров, а коллбэки разные: начатое для
+   * одного не должно засчитаться в коллбэке другого.
+   */
+  provider: OauthProvider;
   state: string;
   verifier: string;
+  /** Только у SSO: OpenID Connect возвращает его внутри id_token. */
+  nonce?: string;
   next: string;
   intent: OauthIntent;
 }
@@ -42,9 +64,9 @@ interface Handshake {
  * Состояние рукопожатия живёт в httpOnly-куке, а не в базе, как WebAuthn-
  * challenge. Причина в том, кто с чем сверяется: challenge нельзя отдавать
  * клиенту, потому что клиент на нём подписывает, а `state` клиент и так видит
- * в адресной строке — весь его смысл в том, что вернувшийся из Яндекса адрес
- * сверяется с тем, что лежит в куке этого браузера. Подделать её нельзя, и
- * лишняя таблица с уборкой протухших строк ничего к этому не добавит.
+ * в адресной строке — весь его смысл в том, что вернувшийся от провайдера
+ * адрес сверяется с тем, что лежит в куке этого браузера. Подделать её нельзя,
+ * и лишняя таблица с уборкой протухших строк ничего к этому не добавит.
  */
 async function saveHandshake(handshake: Handshake): Promise<void> {
   const store = await cookies();
@@ -59,10 +81,11 @@ async function saveHandshake(handshake: Handshake): Promise<void> {
 
 /**
  * Читает и стирает рукопожатие: одноразовое по построению, как и challenge.
- * Кука снимается в любом случае — и при отказе, и при ошибке, — иначе
- * брошенная попытка осталась бы висеть в браузере до конца своих десяти минут.
+ * Кука снимается в любом случае — и при отказе, и при ошибке, и когда она от
+ * другого провайдера, — иначе брошенная попытка осталась бы висеть в браузере
+ * до конца своих десяти минут.
  */
-export async function takeHandshake(): Promise<Handshake | null> {
+export async function takeHandshake(provider: OauthProvider): Promise<Handshake | null> {
   const store = await cookies();
   const raw = store.get(OAUTH_COOKIE)?.value;
   store.delete(OAUTH_COOKIE);
@@ -71,16 +94,27 @@ export async function takeHandshake(): Promise<Handshake | null> {
   try {
     const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString()) as Partial<Handshake>;
     if (!parsed.state || !parsed.verifier) return null;
+    // Кука без провайдера — от версии, где провайдер был один, Яндекс.
+    if ((parsed.provider ?? 'yandex') !== provider) return null;
 
     return {
+      provider,
       state: parsed.state,
       verifier: parsed.verifier,
+      nonce: parsed.nonce,
       next: safeNext(parsed.next),
       intent: parsed.intent === 'link' ? 'link' : 'login',
     };
   } catch {
     return null;
   }
+}
+
+function pkce() {
+  const state = randomBytes(32).toString('base64url');
+  const verifier = randomBytes(32).toString('base64url');
+  const codeChallenge = createHash('sha256').update(verifier).digest('base64url');
+  return { state, verifier, codeChallenge };
 }
 
 /**
@@ -91,70 +125,92 @@ export async function beginYandexHandshake(
   config: YandexConfig,
   params: { next: string; intent: OauthIntent },
 ): Promise<string> {
-  const state = randomBytes(32).toString('base64url');
-  const verifier = randomBytes(32).toString('base64url');
-  const codeChallenge = createHash('sha256').update(verifier).digest('base64url');
+  const { state, verifier, codeChallenge } = pkce();
 
-  await saveHandshake({ state, verifier, next: params.next, intent: params.intent });
+  await saveHandshake({ provider: 'yandex', state, verifier, ...params });
 
   return authorizeUrl(config, { state, codeChallenge });
 }
 
+/** То же для SSO, плюс `nonce`: по нему коллбэк узнает свой id_token. */
+export async function beginSsoHandshake(
+  config: sso.SsoConfig,
+  discovery: sso.Discovery,
+  params: { next: string; intent: OauthIntent },
+): Promise<string> {
+  const { state, verifier, codeChallenge } = pkce();
+  const nonce = randomBytes(32).toString('base64url');
+
+  await saveHandshake({ provider: 'sso', state, verifier, nonce, ...params });
+
+  return sso.authorizeUrl(config, discovery, { state, nonce, codeChallenge });
+}
+
 /**
- * Обновляет снимок логина и почты: в Яндексе они могли смениться.
+ * Обновляет снимок логина и почты: у провайдера они могли смениться.
  *
  * `updateMany`, а не `update`: строку могли отвязать в соседней вкладке между
  * чтением и записью, и падать из-за этого входу незачем. Имя аккаунта при этом
- * не трогается — человек мог назваться в Яндексе как угодно, а под прежним
+ * не трогается — человек мог назваться у провайдера как угодно, а под прежним
  * именем он уже записан в таблицах турниров.
  */
-async function touchAccount(identity: YandexIdentity): Promise<void> {
+async function touchAccount(provider: OauthProvider, identity: OauthIdentity): Promise<void> {
   await prisma.oauthAccount.updateMany({
-    where: { provider: 'yandex', providerAccountId: identity.subject },
+    where: { provider, providerAccountId: identity.subject },
     data: { login: identity.login, email: identity.email, lastLoginAt: new Date() },
   });
 }
 
-async function findAccount(subject: string): Promise<{ userId: string } | null> {
+async function findAccount(
+  provider: OauthProvider,
+  subject: string,
+): Promise<{ userId: string } | null> {
   return prisma.oauthAccount.findUnique({
-    where: { provider_providerAccountId: { provider: 'yandex', providerAccountId: subject } },
+    where: { provider_providerAccountId: { provider, providerAccountId: subject } },
     select: { userId: true },
   });
 }
 
 /**
- * Вход знакомым Яндексом. `null` значит, что такого мы не знаем — это не
- * ошибка, а новый человек, и дальше его ждёт выбор имени.
+ * Вход знакомым аккаунтом провайдера. `null` значит, что такого мы не знаем —
+ * это не ошибка, а новый человек, и дальше его ждёт выбор имени.
  *
- * Слияния с существующим аккаунтом по почте нет намеренно. Почты приложение
- * теперь и не видит, а доверять чужому адресу как доказательству «это тот же
- * человек» значило бы отдавать аккаунт всякому, кто заведёт себе такой же
- * ящик. Связать входы можно только изнутри: войдя своим passkey и нажав
- * «привязать».
+ * Слияния с существующим аккаунтом по почте нет намеренно, и SSO здесь не
+ * исключение, хоть почту он и присылает. Доверять адресу как доказательству
+ * «это тот же человек» значило бы отдавать аккаунт всякому, кто заведёт себе
+ * такой же ящик — или впишет его себе в профиль SSO. Связать входы можно
+ * только изнутри: войдя одним способом и нажав «привязать» другой.
  */
-export async function signInWithYandex(identity: YandexIdentity): Promise<string | null> {
-  const existing = await findAccount(identity.subject);
+export async function signInWith(
+  provider: OauthProvider,
+  identity: OauthIdentity,
+): Promise<string | null> {
+  const existing = await findAccount(provider, identity.subject);
   if (!existing) return null;
 
-  await touchAccount(identity);
+  await touchAccount(provider, identity);
   return existing.userId;
 }
 
 /**
  * Регистрация, отложенная до выбора имени.
  *
- * Между «Яндекс подтвердил, кто это» и «аккаунт создан» появляется разговор:
- * человек называет себя сам, а не получает в турнирную таблицу свой логин.
- * До конца разговора аккаунта не существует — бросил на полпути, и не осталось
- * ничего.
+ * Между «провайдер подтвердил, кто это» и «аккаунт создан» появляется
+ * разговор: человек называет себя сам, а не получает в турнирную таблицу свой
+ * логин. До конца разговора аккаунта не существует — бросил на полпути, и не
+ * осталось ничего.
  */
 const SIGNUP_COOKIE = 'padel_signup';
 const SIGNUP_TTL_MS = 15 * 60_000;
 
-export async function beginSignup(identity: YandexIdentity, next: string): Promise<void> {
+export async function beginSignup(
+  provider: OauthProvider,
+  identity: OauthIdentity,
+  next: string,
+): Promise<void> {
   const row = await prisma.oauthSignup.create({
     data: {
-      provider: 'yandex',
+      provider,
       providerAccountId: identity.subject,
       login: identity.login,
       email: identity.email,
@@ -178,6 +234,8 @@ export interface PendingSignup {
   /** Логин у провайдера — им подсказывается имя, если своё не придумалось. */
   suggestion: string;
   next: string;
+  /** Через кого вошли: экран имени говорит, чем человек будет входить дальше. */
+  provider: OauthProvider;
 }
 
 /** Читает начатую регистрацию, не тратя её: экрану нужно лишь показать форму. */
@@ -191,12 +249,16 @@ export async function peekSignup(): Promise<PendingSignup | null> {
   const row = await prisma.oauthSignup
     .findFirst({
       where: { id, expiresAt: { gt: new Date() } },
-      select: { login: true, next: true },
+      select: { login: true, next: true, provider: true },
     })
     .catch(() => null);
   if (!row) return null;
 
-  return { suggestion: (row.login ?? '').slice(0, NAME_MAX), next: safeNext(row.next) };
+  return {
+    suggestion: (row.login ?? '').slice(0, NAME_MAX),
+    next: safeNext(row.next),
+    provider: row.provider,
+  };
 }
 
 /** Регистрация отыграна: строка больше не нужна, кука тем более. */
@@ -229,13 +291,13 @@ function validateName(input: unknown): string {
  * Завершение регистрации: аккаунт с выбранным именем и личный клуб — ровно
  * как при регистрации по passkey, аккаунт без клуба показывать нечего.
  *
- * Кто регистрируется, берётся из базы, а не из запроса: клиент присылает одно
- * лишь имя.
+ * Кто регистрируется и через какого провайдера, берётся из базы, а не из
+ * запроса: клиент присылает одно лишь имя.
  *
  * Начатая регистрация не тратится на неудачную попытку — иначе «такое имя уже
- * занято» означало бы «идите на Яндекс заново», хотя человеку достаточно
+ * занято» означало бы «идите к провайдеру заново», хотя человеку достаточно
  * придумать другое имя. Единственность аккаунта держится не на этом, а на
- * уникальности связи с Яндексом: второй раз тем же `id` аккаунт не завести,
+ * уникальности связи с провайдером: второй раз тем же `id` аккаунт не завести,
  * сколько бы вкладок ни пыталось разом.
  */
 export async function completeSignup(name: unknown): Promise<{ userId: string; next: string }> {
@@ -248,14 +310,14 @@ export async function completeSignup(name: unknown): Promise<{ userId: string; n
     ? await prisma.oauthSignup
         .findFirst({
           where: { id, expiresAt: { gt: new Date() } },
-          select: { providerAccountId: true, login: true, email: true, next: true },
+          select: { provider: true, providerAccountId: true, login: true, email: true, next: true },
         })
         .catch(() => null)
     : null;
 
   if (!id || !pending) {
     store.delete(SIGNUP_COOKIE);
-    throw new ApiError('Регистрация истекла — войдите через Яндекс ещё раз', 408);
+    throw new ApiError('Регистрация истекла — войдите ещё раз', 408);
   }
 
   let user: { id: string; displayName: string };
@@ -267,7 +329,7 @@ export async function completeSignup(name: unknown): Promise<{ userId: string; n
         displayName: username,
         oauthAccounts: {
           create: {
-            provider: 'yandex',
+            provider: pending.provider,
             providerAccountId: pending.providerAccountId,
             login: pending.login,
             email: pending.email,
@@ -284,11 +346,11 @@ export async function completeSignup(name: unknown): Promise<{ userId: string; n
       throw new ApiError('Такое имя уже занято', 409);
     }
 
-    // Тем временем этот же Яндекс успел завести аккаунт в другой вкладке.
-    // Регистрировать нечего, и держать начатую больше незачем.
+    // Тем временем этот же аккаунт провайдера успел зарегистрироваться в
+    // другой вкладке. Регистрировать нечего, и держать начатую незачем.
     if (uniqueViolationOn(error, 'provider_account_id')) {
       await discardSignup(id, store);
-      throw new ApiError('Этот Яндекс ID уже зарегистрирован — войдите им', 409);
+      throw new ApiError('Этот аккаунт уже зарегистрирован — войдите им', 409);
     }
 
     throw error;
@@ -307,25 +369,29 @@ export async function completeSignup(name: unknown): Promise<{ userId: string; n
 }
 
 /**
- * Чем кончилась привязка. Совпадает с кодами из lib/yandex.ts: результат
- * уезжает в адресную строку, а текст к нему подбирает экран.
+ * Чем кончилась привязка. Совпадает с кодами из lib/yandex.ts и lib/sso.ts:
+ * результат уезжает в адресную строку, а текст к нему подбирает экран.
  */
 export type LinkResult = 'linked' | 'taken' | 'occupied';
 
-export async function linkYandex(userId: string, identity: YandexIdentity): Promise<LinkResult> {
-  const existing = await findAccount(identity.subject);
+export async function linkAccount(
+  provider: OauthProvider,
+  userId: string,
+  identity: OauthIdentity,
+): Promise<LinkResult> {
+  const existing = await findAccount(provider, identity.subject);
   if (existing) {
-    // Свой же Яндекс, привязанный ранее: повтор ничего не меняет и ошибкой не
+    // Свой же аккаунт, привязанный ранее: повтор ничего не меняет и ошибкой не
     // является — человек видит ровно то, чего добивался.
     if (existing.userId !== userId) return 'taken';
-    await touchAccount(identity);
+    await touchAccount(provider, identity);
     return 'linked';
   }
 
   try {
     await prisma.oauthAccount.create({
       data: {
-        provider: 'yandex',
+        provider,
         providerAccountId: identity.subject,
         userId,
         login: identity.login,
@@ -334,56 +400,75 @@ export async function linkYandex(userId: string, identity: YandexIdentity): Prom
     });
     return 'linked';
   } catch (error) {
-    // К аккаунту уже привязан другой Яндекс. Молча заменить нельзя: это
-    // сменило бы человеку способ входа без его ведома.
+    // К аккаунту уже привязан другой аккаунт этого провайдера. Молча заменить
+    // нельзя: это сменило бы человеку способ входа без его ведома.
     if (uniqueViolationOn(error, 'user_id')) return 'occupied';
     if (uniqueViolationOn(error, 'provider_account_id')) return 'taken';
     throw error;
   }
 }
 
-export interface LinkedYandex {
+export interface LinkedAccount {
   login: string | null;
   email: string | null;
-  /** Можно ли отвязать: passkey — единственный оставшийся способ войти. */
+  /** Можно ли отвязать: останется ли у аккаунта другой способ войти. */
   removable: boolean;
 }
 
+/**
+ * Есть ли у аккаунта вход помимо этого провайдера: passkey или другой
+ * провайдер. Одно условие и для экрана, и для самой отвязки — разойдись они,
+ * и кнопка обещала бы то, чего сервер не сделает.
+ */
+function otherSignIn(provider: OauthProvider) {
+  return {
+    OR: [
+      { credentials: { some: {} } },
+      { oauthAccounts: { some: { provider: { not: provider } } } },
+    ],
+  };
+}
+
 /** Что привязано к аккаунту — для экрана профиля. */
-export async function linkedYandex(userId: string): Promise<LinkedYandex | null> {
-  const [account, passkeys] = await Promise.all([
+export async function linkedAccount(
+  userId: string,
+  provider: OauthProvider,
+): Promise<LinkedAccount | null> {
+  const [account, others] = await Promise.all([
     prisma.oauthAccount.findUnique({
-      where: { userId_provider: { userId, provider: 'yandex' } },
+      where: { userId_provider: { userId, provider } },
       select: { login: true, email: true },
     }),
-    prisma.credential.count({ where: { userId } }),
+    prisma.user.count({ where: { id: userId, ...otherSignIn(provider) } }),
   ]);
 
   if (!account) return null;
-  return { login: account.login, email: account.email, removable: passkeys > 0 };
+  return { login: account.login, email: account.email, removable: others > 0 };
 }
 
 /**
- * Отвязка. Запрещена, пока Яндекс — единственный вход: аккаунт, в который
- * нельзя войти, ничем не лучше удалённого, а удаление аккаунта — отдельное
- * решение, которого человек в этот момент не принимал.
+ * Отвязка. Запрещена, пока этот провайдер — единственный вход: аккаунт, в
+ * который нельзя войти, ничем не лучше удалённого, а удаление аккаунта —
+ * отдельное решение, которого человек в этот момент не принимал.
  */
-export async function unlinkYandex(userId: string): Promise<boolean> {
+export async function unlinkAccount(userId: string, provider: OauthProvider): Promise<boolean> {
   const { count } = await prisma.oauthAccount.deleteMany({
     where: {
       userId,
-      provider: 'yandex',
+      provider,
       // Условие проверяет база в том же запросе, которым удаляет: между
-      // отдельным подсчётом passkey и удалением их можно успеть снести, и
-      // тогда аккаунт остался бы вообще без входа.
-      user: { credentials: { some: {} } },
+      // отдельным подсчётом и удалением другой вход можно успеть снести, и
+      // тогда аккаунт остался бы вообще без входа. Щель остаётся одна —
+      // одновременная отвязка обоих провайдеров из двух вкладок, где каждая
+      // ещё видит другой на месте.
+      user: otherSignIn(provider),
     },
   });
 
   if (count > 0) return true;
 
   // Ничего не удалилось: либо отвязывать нечего — и тогда всё уже так, как
-  // человек хотел, — либо passkey нет, и отвязка оставила бы его снаружи.
-  const linked = await prisma.oauthAccount.count({ where: { userId, provider: 'yandex' } });
+  // человек хотел, — либо другого входа нет, и отвязка оставила бы его снаружи.
+  const linked = await prisma.oauthAccount.count({ where: { userId, provider } });
   return linked === 0;
 }

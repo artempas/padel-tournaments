@@ -9,13 +9,21 @@ const NAME_MIN = 2;
 const NAME_MAX = 40;
 
 /**
- * Как называть человека, который только что вошёл через Яндекс.
+ * Как называть человека, который только что вошёл через Яндекс или SSO.
  *
  * Спрашивается ровно один раз и только у нового: аккаунта до ответа не
- * существует, и логин Яндекса в турнирной таблице никого не устроит.
- * Подсказкой в поле стоит логин — принять его можно одним нажатием.
+ * существует, и логин провайдера в турнирной таблице никого не устроит.
+ * Подсказкой в поле стоит то, что прислал провайдер, — принять его можно одним
+ * нажатием.
  */
-export default function SignupNameForm({ suggestion }: { suggestion: string }) {
+export default function SignupNameForm({
+  suggestion,
+  via,
+}: {
+  suggestion: string;
+  /** Чем человек вошёл и будет входить дальше: «Яндекс ID», «authentik». */
+  via: string;
+}) {
   const router = useRouter();
   const [name, setName] = useState(suggestion.slice(0, NAME_MAX));
   const [busy, setBusy] = useState(false);
@@ -27,7 +35,7 @@ export default function SignupNameForm({ suggestion }: { suggestion: string }) {
     setBusy(true);
 
     try {
-      const { next } = await request<{ next: string }>('/api/auth/yandex/signup', {
+      const { next } = await request<{ next: string }>('/api/auth/signup', {
         method: 'POST',
         body: JSON.stringify({ name }),
       });
@@ -88,7 +96,7 @@ export default function SignupNameForm({ suggestion }: { suggestion: string }) {
       </div>
 
       <p className="text-center text-xs leading-relaxed text-muted">
-        Вход в приложение — через Яндекс ID. Аккаунт появится, когда вы нажмёте «Продолжить».
+        Вход в приложение — через {via}. Аккаунт появится, когда вы нажмёте «Продолжить».
       </p>
     </main>
   );
