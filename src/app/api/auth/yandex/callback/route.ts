@@ -1,7 +1,14 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSession, getCurrentUser, pruneExpired } from '@/lib/auth';
-import { beginSignup, linkYandex, signInWithYandex, takeHandshake } from '@/lib/oauth';
-import { exchangeCode, fetchUserInfo, identityFrom, resolveOrigin, yandexConfig } from '@/lib/yandex';
+import { beginSignup, linkAccount, signInWith, takeHandshake } from '@/lib/oauth';
+import {
+  exchangeCode,
+  fetchUserInfo,
+  identityFrom,
+  noticePath,
+  resolveOrigin,
+  yandexConfig,
+} from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,12 +24,14 @@ export async function GET(request: NextRequest) {
 
   // Кука снимается первым делом и при любом исходе: попытка одноразовая, и
   // брошенная не должна пережить сама себя.
-  const handshake = await takeHandshake();
+  const handshake = await takeHandshake('yandex');
   const next = handshake?.next ?? '/';
   const origin = resolveOrigin(request.headers, request.nextUrl.origin);
 
+  // Без рукопожатия намерения не узнать — значит, это вход: показать экран
+  // входа безопасно в любом случае.
   const back = (notice: string) => {
-    const url = new URL(next, origin);
+    const url = new URL(noticePath(next, handshake?.intent ?? 'login'), origin);
     url.searchParams.set('yandex', notice);
     return NextResponse.redirect(url);
   };
@@ -56,15 +65,15 @@ export async function GET(request: NextRequest) {
       // привязки — худшее, что можно сделать: он остался бы с двумя.
       if (!user) return back('session');
 
-      return back(await linkYandex(user.id, identity));
+      return back(await linkAccount('yandex', user.id, identity));
     }
 
-    const userId = await signInWithYandex(identity);
+    const userId = await signInWith('yandex', identity);
 
     // Незнакомый Яндекс — это не вход, а начало регистрации. Аккаунт заведётся,
     // когда человек назовёт себя: логин в турнирной таблице ему ни к чему.
     if (!userId) {
-      await beginSignup(identity, next);
+      await beginSignup('yandex', identity, next);
       await pruneExpired();
       return NextResponse.redirect(new URL('/welcome', origin));
     }

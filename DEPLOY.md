@@ -170,6 +170,30 @@ https://padel.artem.synology.me/api/auth/yandex/callback
 на `localhost`: Redirect URI у них разные, а смешивать окружения в одном
 приложении Яндекс не советует.
 
+### Вход через authentik (необязательно)
+
+Без этих строк кнопки SSO не будет:
+
+```env
+SSO_ISSUER=https://auth.example.com/application/o/padel/
+SSO_CLIENT_ID=client_id_провайдера
+SSO_CLIENT_SECRET=client_secret_провайдера
+SSO_NAME=authentik
+```
+
+В authentik заведите **OAuth2/OpenID Provider** (Client type — Confidential,
+Subject mode — по умолчанию) с Redirect URI
+
+```
+https://padel.artem.synology.me/api/auth/sso/callback
+```
+
+и **Application** с этим провайдером. `SSO_ISSUER` скопируйте со страницы
+провайдера — поле *OpenID Configuration Issuer*. Контейнер должен сам открывать
+этот адрес: проверьте из терминала NAS
+`docker exec padel-app wget -qO- <SSO_ISSUER>.well-known/openid-configuration`.
+Подробности — в README, раздел «SSO».
+
 ---
 
 ## Шаг 5. Запуск

@@ -3,9 +3,12 @@ import { notFound } from 'next/navigation';
 import ClubBadge from '@/components/ClubBadge';
 import ThemeToggle from '@/components/ThemeToggle';
 import { TierIcon, TierSprite } from '@/components/TierIcon';
-import YandexAccount from '@/components/YandexAccount';
+import LinkedAccountCard from '@/components/LinkedAccountCard';
+import SsoButton from '@/components/SsoButton';
+import YandexButton from '@/components/YandexButton';
 import { pageMembership } from '@/lib/club-page';
-import { linkedYandex } from '@/lib/oauth';
+import { linkedAccount } from '@/lib/oauth';
+import { ssoConfig, ssoNotice } from '@/lib/sso';
 import { yandexConfig, yandexNotice } from '@/lib/yandex';
 import { ROLE_LABELS } from '@/lib/permissions';
 import { plural } from '@/lib/plural';
@@ -30,17 +33,19 @@ const dateFormat = new Intl.DateTimeFormat('ru-RU', {
 export default async function ClubProfilePage({
   searchParams,
 }: {
-  searchParams: Promise<{ yandex?: string }>;
+  searchParams: Promise<{ yandex?: string; sso?: string }>;
 }) {
   const { club, role, personId, user } = await pageMembership();
-  const { yandex } = await searchParams;
+  const { yandex, sso } = await searchParams;
 
   const showYandex = yandexConfig() !== null;
-  const notice = yandexNotice(yandex);
+  const ssoName = ssoConfig()?.name;
+  const notice = yandexNotice(yandex) ?? ssoNotice(sso, ssoName ?? 'SSO');
 
-  const [stats, linked] = await Promise.all([
+  const [stats, linkedYandex, linkedSso] = await Promise.all([
     rosterStats(club.id),
-    showYandex ? linkedYandex(user.id) : null,
+    showYandex ? linkedAccount(user.id, 'yandex') : null,
+    ssoName ? linkedAccount(user.id, 'sso') : null,
   ]);
   const me = stats.find((p) => p.id === personId);
   // Единственный способ сюда попасть — заархивированный игрок, а участника
@@ -140,7 +145,7 @@ export default async function ClubProfilePage({
           клубе свои, а вход один на всё приложение. Отдельной страницы под
           единственную настройку не нужно, но заголовок нужен: без него
           «привязать Яндекс» читалось бы как что-то клубное. */}
-      {showYandex && (
+      {(showYandex || ssoName) && (
         <>
           <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-muted">Аккаунт</h2>
           {notice && (
@@ -148,7 +153,24 @@ export default async function ClubProfilePage({
               {notice}
             </p>
           )}
-          <YandexAccount linked={linked} />
+          {ssoName && (
+            <LinkedAccountCard
+              title={`Вход через ${ssoName}`}
+              hint={`Привяжите ${ssoName}, чтобы входить им — остальные способы входа останутся.`}
+              endpoint="/api/auth/sso"
+              linkButton={<SsoButton name={ssoName} next="/club/me" label={`Привязать ${ssoName}`} />}
+              linked={linkedSso}
+            />
+          )}
+          {showYandex && (
+            <LinkedAccountCard
+              title="Вход через Яндекс ID"
+              hint="Привяжите Яндекс, чтобы входить им — остальные способы входа останутся."
+              endpoint="/api/auth/yandex"
+              linkButton={<YandexButton next="/club/me" label="Привязать Яндекс ID" />}
+              linked={linkedYandex}
+            />
+          )}
         </>
       )}
     </main>

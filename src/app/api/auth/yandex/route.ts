@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { json, requireUser, route } from '@/lib/api';
 import { getCurrentUser } from '@/lib/auth';
-import { beginYandexHandshake, unlinkYandex } from '@/lib/oauth';
-import { resolveOrigin, safeNext, yandexConfig } from '@/lib/yandex';
+import { beginYandexHandshake, unlinkAccount } from '@/lib/oauth';
+import { noticePath, resolveOrigin, safeNext, yandexConfig } from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,8 +20,10 @@ export const dynamic = 'force-dynamic';
 export async function GET(request: NextRequest) {
   const next = safeNext(request.nextUrl.searchParams.get('next'));
   const origin = resolveOrigin(request.headers, request.nextUrl.origin);
+  const user = await getCurrentUser();
+  const intent = user ? 'link' : 'login';
   const back = (notice: string) => {
-    const url = new URL(next, origin);
+    const url = new URL(noticePath(next, intent), origin);
     url.searchParams.set('yandex', notice);
     return NextResponse.redirect(url);
   };
@@ -31,8 +33,7 @@ export async function GET(request: NextRequest) {
   // ссылке. Отвечать 500 не за что: вход просто не подключён.
   if (!config) return back('off');
 
-  const user = await getCurrentUser();
-  const url = await beginYandexHandshake(config, { next, intent: user ? 'link' : 'login' });
+  const url = await beginYandexHandshake(config, { next, intent });
 
   return NextResponse.redirect(url);
 }
@@ -43,11 +44,11 @@ export async function GET(request: NextRequest) {
  */
 export const DELETE = route(async () => {
   const user = await requireUser();
-  const removed = await unlinkYandex(user.id);
+  const removed = await unlinkAccount(user.id, 'yandex');
 
   if (!removed) {
     return json(
-      { error: 'Это единственный способ войти в аккаунт — сначала создайте passkey' },
+      { error: 'Это единственный способ войти в аккаунт — сначала добавьте другой' },
       409,
     );
   }

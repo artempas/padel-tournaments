@@ -5,6 +5,7 @@ import {
   accountName,
   authorizeUrl,
   identityFrom,
+  noticePath,
   resolveOrigin,
   safeNext,
   yandexNotice,
@@ -162,4 +163,15 @@ test('неизвестный код в адресе — молчание, а н�
   assert.equal(yandexNotice('linked'), 'Яндекс ID привязан.');
   assert.equal(yandexNotice(null), null);
   assert.equal(yandexNotice('что-угодно'), null);
+});
+
+test('сорвавшийся вход возвращается туда, где есть экран входа', () => {
+  // Закрытая страница отправила бы невошедшего на `/` без сообщения.
+  assert.equal(noticePath('/tournaments', 'login'), '/');
+  assert.equal(noticePath('/', 'login'), '/');
+  assert.equal(noticePath('/players', 'login'), '/?next=%2Fplayers');
+  // Приглашение рисует экран входа само — и не теряет при этом подсказку.
+  assert.equal(noticePath('/join/abc', 'login'), '/join/abc');
+  // Привязку начинают вошедшим из профиля — туда и обратно.
+  assert.equal(noticePath('/club/me', 'link'), '/club/me');
 });

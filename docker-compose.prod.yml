@@ -20,6 +20,12 @@ services:
       YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
       YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
       YANDEX_REDIRECT_URI: ${YANDEX_REDIRECT_URI:-}
+      # Вход через свой SSO (authentik и т. п.). Пусто — кнопки нет.
+      SSO_ISSUER: ${SSO_ISSUER:-}
+      SSO_CLIENT_ID: ${SSO_CLIENT_ID:-}
+      SSO_CLIENT_SECRET: ${SSO_CLIENT_SECRET:-}
+      SSO_NAME: ${SSO_NAME:-}
+      SSO_REDIRECT_URI: ${SSO_REDIRECT_URI:-}
     # Lets the container reach a Postgres that publishes a port on the NAS
     # itself, via host.docker.internal.
     extra_hosts:
