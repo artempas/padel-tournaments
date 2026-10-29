@@ -1,7 +1,14 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSession, getCurrentUser, pruneExpired } from '@/lib/auth';
 import { beginSignup, linkAccount, signInWith, takeHandshake } from '@/lib/oauth';
-import { exchangeCode, fetchUserInfo, identityFrom, resolveOrigin, yandexConfig } from '@/lib/yandex';
+import {
+  exchangeCode,
+  fetchUserInfo,
+  identityFrom,
+  noticePath,
+  resolveOrigin,
+  yandexConfig,
+} from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,8 +28,10 @@ export async function GET(request: NextRequest) {
   const next = handshake?.next ?? '/';
   const origin = resolveOrigin(request.headers, request.nextUrl.origin);
 
+  // Без рукопожатия намерения не узнать — значит, это вход: показать экран
+  // входа безопасно в любом случае.
   const back = (notice: string) => {
-    const url = new URL(next, origin);
+    const url = new URL(noticePath(next, handshake?.intent ?? 'login'), origin);
     url.searchParams.set('yandex', notice);
     return NextResponse.redirect(url);
   };

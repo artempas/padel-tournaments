@@ -10,7 +10,7 @@ import {
   ssoConfig,
   verifyIdToken,
 } from '@/lib/sso';
-import { resolveOrigin } from '@/lib/yandex';
+import { noticePath, resolveOrigin } from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
   const origin = resolveOrigin(request.headers, request.nextUrl.origin);
 
   const back = (notice: string) => {
-    const url = new URL(next, origin);
+    const url = new URL(noticePath(next, handshake?.intent ?? 'login'), origin);
     url.searchParams.set('sso', notice);
     return NextResponse.redirect(url);
   };

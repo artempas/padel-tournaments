@@ -3,7 +3,7 @@ import { json, requireUser, route } from '@/lib/api';
 import { getCurrentUser } from '@/lib/auth';
 import { beginSsoHandshake, unlinkAccount } from '@/lib/oauth';
 import { discover, ssoConfig } from '@/lib/sso';
-import { resolveOrigin, safeNext } from '@/lib/yandex';
+import { noticePath, resolveOrigin, safeNext } from '@/lib/yandex';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,8 +14,10 @@ export const dynamic = 'force-dynamic';
 export async function GET(request: NextRequest) {
   const next = safeNext(request.nextUrl.searchParams.get('next'));
   const origin = resolveOrigin(request.headers, request.nextUrl.origin);
+  const user = await getCurrentUser();
+  const intent = user ? 'link' : 'login';
   const back = (notice: string) => {
-    const url = new URL(next, origin);
+    const url = new URL(noticePath(next, intent), origin);
     url.searchParams.set('sso', notice);
     return NextResponse.redirect(url);
   };
@@ -33,8 +35,7 @@ export async function GET(request: NextRequest) {
     return back('off');
   }
 
-  const user = await getCurrentUser();
-  const url = await beginSsoHandshake(config, discovery, { next, intent: user ? 'link' : 'login' });
+  const url = await beginSsoHandshake(config, discovery, { next, intent });
 
   return NextResponse.redirect(url);
 }
