@@ -44,8 +44,8 @@ export const CALIBRATION_MATCHES = 10;
 
 /** Матч глазами рейтинга: кто с кем и с каким счётом. */
 export interface RatedMatch {
-  teamA: readonly [string, string];
-  teamB: readonly [string, string];
+  teamA: readonly string[];
+  teamB: readonly string[];
   scoreA: number;
   scoreB: number;
 }
@@ -65,9 +65,9 @@ export interface PlayerRating {
   delta: number;
 }
 
-/** Пара на тот же момент: двое и их среднее — та самая сила пары из расчёта. */
+/** Сторона на тот же момент: участники и их средний рейтинг. */
 export interface TeamRating {
-  players: [PlayerRating, PlayerRating];
+  players: PlayerRating[];
   rating: number;
   delta: number;
 }
@@ -178,26 +178,26 @@ function outlookOf(share: number, scoreA: number, scoreB: number): MatchOutlook 
 }
 
 /**
- * Снимок пары: что стало с каждым и со средним по двоим.
+ * Снимок стороны: что стало с каждым и со средним рейтингом.
  *
  * Дельта считается по разнице показанных чисел, а не сырых: тогда изменения
  * матчей складываются ровно в изменение за турнир, без расхождения в единицу
  * там, где копейки набежали в целое.
  */
 function snapshot(
-  ids: readonly [string, string],
-  before: readonly [number, number],
+  ids: readonly string[],
+  before: readonly number[],
   rows: Rating[],
 ): TeamRating {
-  const meanBefore = (before[0] + before[1]) / 2;
-  const meanAfter = (rows[0].rating + rows[1].rating) / 2;
+  const meanBefore = before.reduce((sum, r) => sum + r, 0) / before.length;
+  const meanAfter = rows.reduce((sum, r) => sum + r.rating, 0) / rows.length;
 
   return {
-    players: [0, 1].map((i) => ({
+    players: ids.map((_, i) => ({
       id: ids[i],
       rating: Math.round(rows[i].rating),
       delta: Math.round(rows[i].rating) - Math.round(before[i]),
-    })) as [PlayerRating, PlayerRating],
+    })),
     rating: Math.round(meanAfter),
     delta: Math.round(meanAfter) - Math.round(meanBefore),
   };
@@ -233,19 +233,18 @@ function* replay(
     const a = match.teamA.map(get);
     const b = match.teamB.map(get);
 
-    const beforeA: [number, number] = [a[0].rating, a[1].rating];
-    const beforeB: [number, number] = [b[0].rating, b[1].rating];
+    const beforeA = a.map((p) => p.rating);
+    const beforeB = b.map((p) => p.rating);
 
-    // Сила пары — среднее двоих: партнёр слабее делает победу ожидаемее для
-    // соперника, и рейтинг сам это учитывает.
-    const ratingA = (beforeA[0] + beforeA[1]) / 2;
-    const ratingB = (beforeB[0] + beforeB[1]) / 2;
+    // Сила стороны — среднее партнёров или рейтинг единственного игрока.
+    const ratingA = beforeA.reduce((sum, r) => sum + r, 0) / beforeA.length;
+    const ratingB = beforeB.reduce((sum, r) => sum + r, 0) / beforeB.length;
 
     const expected = expectedShare(ratingA, ratingB);
     const surplus = match.scoreA / total - expected;
 
-    // Все четыре дельты считаются от рейтингов до матча, поэтому порядок
-    // обхода четвёрки ни на что не влияет. Сумма изменений строго нулевая
+    // Все дельты считаются от рейтингов до матча, поэтому порядок
+    // обхода участников ни на что не влияет. Сумма изменений строго нулевая
     // только при равных K: у новичка коэффициент выше, и его матч слегка
     // подкачивает рейтинг в клуб. Это цена быстрой сходимости новичков, и она
     // того стоит — иначе первые вечера рейтинг не значил бы ничего.
@@ -330,8 +329,8 @@ export interface RatingMatch {
   delta: number;
   scoreFor: number;
   scoreAgainst: number;
-  partnerId: string;
-  opponentIds: [string, string];
+  partnerId: string | null;
+  opponentIds: string[];
 }
 
 /** Турнир в истории игрока: рейтинг на его конец и матчи, из которых он сложился. */
@@ -396,8 +395,8 @@ export function ratingHistory(matches: readonly PlayedMatch[]): Map<string, Rati
           delta: player.delta,
           scoreFor: side.got,
           scoreAgainst: side.lost,
-          partnerId: side.team.players[1 - slot].id,
-          opponentIds: [side.foes[0], side.foes[1]],
+          partnerId: side.team.players[1 - slot]?.id ?? null,
+          opponentIds: [...side.foes],
         });
         point.rating = player.rating;
         point.delta += player.delta;

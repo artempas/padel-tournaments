@@ -25,7 +25,7 @@ export function computeStandings(players: Player[], matches: Match[]): Standing[
   for (const match of matches) {
     if (match.score1 === null || match.score2 === null) continue;
 
-    const sides: Array<{ ids: [string, string]; scored: number; conceded: number }> = [
+    const sides: Array<{ ids: readonly string[]; scored: number; conceded: number }> = [
       { ids: match.team1, scored: match.score1, conceded: match.score2 },
       { ids: match.team2, scored: match.score2, conceded: match.score1 },
     ];

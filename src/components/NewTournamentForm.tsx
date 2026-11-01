@@ -4,7 +4,8 @@ import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ThemeToggle from './ThemeToggle';
-import { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS } from '@/lib/americano';
+import { MAX_COURTS, MAX_PLAYERS } from '@/lib/americano';
+import { activeCourts, courtLabel } from '@/lib/courts';
 import { FORMAT_OPTIONS, tournamentSize } from '@/lib/formats';
 import { DEFAULT_ROUNDS, MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
 import { plural } from '@/lib/plural';
@@ -18,6 +19,7 @@ export interface NewTournamentFormProps {
   initialName: string;
   initialPlayers?: string[];
   initialCourts?: number;
+  initialSinglesCourts?: number;
   initialPointsPerMatch?: number;
   initialFormat?: PlayableFormat;
   initialRounds?: number;
@@ -31,6 +33,7 @@ export default function NewTournamentForm({
   initialName,
   initialPlayers = [],
   initialCourts = 1,
+  initialSinglesCourts = 0,
   initialPointsPerMatch = 16,
   initialFormat = 'americano',
   initialRounds = DEFAULT_ROUNDS,
@@ -41,7 +44,10 @@ export default function NewTournamentForm({
   const [name, setName] = useState(initialName);
   const [players, setPlayers] = useState<string[]>(initialPlayers);
   const [draft, setDraft] = useState('');
-  const [courts, setCourts] = useState(initialCourts);
+  const [doublesCourts, setDoublesCourts] = useState(initialCourts - initialSinglesCourts);
+  const [singlesCourts, setSinglesCourts] = useState(initialSinglesCourts);
+  const courts = doublesCourts + singlesCourts;
+  const minPlayers = doublesCourts > 0 ? 4 : 2;
   const [pointsPerMatch, setPointsPerMatch] = useState(initialPointsPerMatch);
   const [format, setFormat] = useState<PlayableFormat>(initialFormat);
   const [rounds, setRounds] = useState(initialRounds);
@@ -49,13 +55,14 @@ export default function NewTournamentForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const usefulCourts = Math.max(1, Math.floor(players.length / 4));
-  const effectiveCourts = Math.min(courts, usefulCourts);
+  const config = { doubles: doublesCourts, singles: singlesCourts };
+  const active = activeCourts(players.length, config);
+  const effectiveCourts = active.doubles + active.singles;
 
   const preview = useMemo(() => {
-    if (players.length < MIN_PLAYERS) return null;
-    return tournamentSize(format, players.length, effectiveCourts, rounds);
-  }, [format, players.length, effectiveCourts, rounds]);
+    if (players.length < minPlayers || courts === 0) return null;
+    return tournamentSize(format, players.length, { doubles: doublesCourts, singles: singlesCourts }, rounds);
+  }, [format, players.length, doublesCourts, singlesCourts, rounds, minPlayers, courts]);
 
   const chosen = useMemo(
     () => new Set(players.map((p) => p.toLocaleLowerCase('ru'))),
@@ -92,8 +99,9 @@ export default function NewTournamentForm({
     event.preventDefault();
     setError(null);
 
-    if (players.length < MIN_PLAYERS) {
-      setError(`Нужно минимум ${MIN_PLAYERS} игрока`);
+    if (courts === 0) { setError('Добавьте хотя бы один корт'); return; }
+    if (players.length < minPlayers) {
+      setError(`Нужно минимум ${minPlayers} игрока`);
       return;
     }
 
@@ -106,7 +114,8 @@ export default function NewTournamentForm({
         body: JSON.stringify({
           name: name.trim() || 'Турнир',
           players,
-          courts: effectiveCourts,
+          doublesCourts,
+          singlesCourts,
           pointsPerMatch,
           format,
           // У американо длину задаёт состав — сервер такое поле проигнорирует.
@@ -192,7 +201,12 @@ export default function NewTournamentForm({
           </div>
 
           <p className="mt-3 text-xs leading-relaxed text-muted">
-            {FORMAT_OPTIONS.find((o) => o.value === format)?.hint}
+            {singlesCourts === 0 ? FORMAT_OPTIONS.find((o) => o.value === format)?.hint
+              : format === 'mexicano'
+                ? 'Соперники следующего раунда подбираются по таблице. Одиночные игры и отдых распределяются между участниками.'
+                : doublesCourts === 0
+                  ? 'Каждый сыграет против каждого. Число раундов рассчитывается автоматически.'
+                  : 'Длину задаёт смена партнёров в парных играх. Одиночные встречи идут параллельно; встреча 1 на 1 не считается партнёрством.'}
           </p>
 
           {format === 'mexicano' && (
@@ -311,38 +325,38 @@ export default function NewTournamentForm({
           )}
 
           <p className="mt-3 text-xs leading-relaxed text-muted">
-            От {MIN_PLAYERS} до {MAX_PLAYERS} игроков. Список можно вставить целиком — через
+            От {minPlayers} до {MAX_PLAYERS} игроков. Список можно вставить целиком — через
             запятую или с новой строки.
           </p>
         </section>
 
         <section className="card p-4">
           <h2 className="mb-3 font-semibold">Корты</h2>
-          <div className="flex items-center gap-4">
-            <button
-              type="button"
-              onClick={() => setCourts((c) => Math.max(1, c - 1))}
-              disabled={courts <= 1}
-              className="tap w-14 rounded-xl border border-line text-xl font-bold disabled:opacity-30"
-            >
-              −
-            </button>
-            <span className="flex-1 text-center text-3xl font-bold tabular-nums">{courts}</span>
-            <button
-              type="button"
-              onClick={() => setCourts((c) => Math.min(MAX_COURTS, c + 1))}
-              disabled={courts >= MAX_COURTS}
-              className="tap w-14 rounded-xl border border-line text-xl font-bold disabled:opacity-30"
-            >
-              +
-            </button>
+          <div className="flex flex-col gap-4">
+            {[
+              { label: 'Корты 2 на 2', value: doublesCourts, set: setDoublesCourts },
+              { label: 'Корты 1 на 1', value: singlesCourts, set: setSinglesCourts },
+            ].map(({ label, value, set }) => (
+              <div key={label} className="flex items-center gap-3">
+                <span className="min-w-0 flex-1 text-sm font-medium">{label}</span>
+                <button type="button" onClick={() => set((n) => Math.max(0, n - 1))}
+                  disabled={value === 0} aria-label={`Уменьшить: ${label}`}
+                  className="tap w-12 rounded-xl border border-line text-xl font-bold disabled:opacity-30">−</button>
+                <output aria-label={label} className="w-9 text-center text-2xl font-bold tabular-nums">{value}</output>
+                <button type="button" onClick={() => set((n) => n + 1)}
+                  disabled={courts >= MAX_COURTS} aria-label={`Добавить: ${label}`}
+                  className="tap w-12 rounded-xl border border-line text-xl font-bold disabled:opacity-30">+</button>
+              </div>
+            ))}
           </div>
-
-          {players.length >= MIN_PLAYERS && courts > usefulCourts && (
+          <p className="mt-3 text-xs leading-relaxed text-muted">
+            Всего {courts} из {MAX_COURTS} кортов · до {doublesCourts * 4 + singlesCourts * 2} игроков одновременно.
+          </p>
+          {courts === 0 && <p className="mt-3 text-sm text-warn">Добавьте хотя бы один корт.</p>}
+          {players.length >= minPlayers && effectiveCourts < courts && (
             <p className="mt-3 rounded-xl border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
-              На {players.length} игроков одновременно занять получится только{' '}
-              {usefulCourts} {plural(usefulCourts, 'корт', 'корта', 'кортов')} — остальные
-              простаивают.
+              Для этого состава в полном раунде используются {courtLabel(active)}.
+              Остальные корты сохранятся в конфигурации.
             </p>
           )}
         </section>
@@ -401,7 +415,7 @@ export default function NewTournamentForm({
           <div className="mx-auto max-w-2xl">
             <button
               type="submit"
-              disabled={busy || players.length < MIN_PLAYERS}
+              disabled={busy || players.length < minPlayers || courts === 0}
               className="tap w-full rounded-xl bg-accent px-4 font-bold text-accent-ink disabled:opacity-40"
             >
               {busy ? 'Составляем расписание…' : 'Создать турнир'}

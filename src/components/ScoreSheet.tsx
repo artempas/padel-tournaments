@@ -19,7 +19,7 @@ interface Props {
   onClose: () => void;
 }
 
-function teamName(ids: [string, string], playersById: Map<string, Player>): string {
+function teamName(ids: readonly string[], playersById: Map<string, Player>): string {
   return ids.map((id) => playersById.get(id)?.name ?? '—').join(' / ');
 }
 
@@ -77,7 +77,7 @@ export default function ScoreSheet({
             ✕
           </button>
         </div>
-        <p className="mb-5 text-sm text-muted">Матч играется до {pointsPerMatch} очков на двоих.</p>
+        <p className="mb-5 text-sm text-muted">{match.team1.length} на {match.team2.length} · Сумма очков за матч — {pointsPerMatch}.</p>
 
         {/* Отложенный матч выглядит как обычный несыгранный, и без этой строки
             непонятно, почему следующий раунд уже собран. */}

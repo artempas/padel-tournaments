@@ -154,8 +154,8 @@ export default function RatingExplainerSheet({ onClose }: { onClose: () => void 
             уверенной была игра: 12:4 — это 0.75 от матча, 9:7 — всего 0.5625.
           </p>
           <p className="mt-3 text-sm leading-relaxed text-muted">
-            Дальше это число сравнивается с тем, чего от вашей пары ждали, исходя из рейтингов
-            всех четверых. Сыграли лучше ожидаемого — рейтинг вырос, хуже — упал. Поэтому крупная
+            Дальше это число сравнивается с ожидаемым результатом по рейтингам участников.
+            Сыграли лучше ожидаемого — рейтинг вырос, хуже — упал. Поэтому крупная
             победа над сильными стоит дорого, а скромная над слабыми может увести в минус.
           </p>
         </section>
@@ -163,8 +163,8 @@ export default function RatingExplainerSheet({ onClose }: { onClose: () => void 
         <section className="mb-6">
           <h3 className="mb-2 text-sm font-semibold">Чего от вас ждут</h3>
           <p className="mb-3 text-sm leading-relaxed text-muted">
-            Сила пары — среднее рейтингов двоих. Разрыв между парами превращается в ожидаемый
-            счёт:
+            В 2 на 2 сила стороны — среднее рейтингов партнёров, в 1 на 1 — рейтинг самого игрока.
+            Оба типа матчей учитываются в общем рейтинге. Разрыв между сторонами превращается в ожидаемый счёт:
           </p>
           <ul className="overflow-hidden rounded-xl border border-line">
             <li className="flex items-center justify-between border-b border-line bg-surface-2 px-3 py-2 text-xs uppercase tracking-wide text-muted">

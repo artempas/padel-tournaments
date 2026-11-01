@@ -1,16 +1,11 @@
 /**
  * Mexicano round builder.
  *
- * Format rules:
- *  - every match is 2 vs 2 and the tournament runs a fixed number of rounds;
- *  - the opening round is seeded by club rating — there is no table yet, but
- *    there is history, and it says more about strength than a draw does;
- *  - every later round is built from the standings as they stand: the four
- *    leaders meet on court 1, the next four on court 2, and so on;
- *  - inside a foursome the pairing is 1st + 4th against 2nd + 3rd, which is
- *    what keeps a match between four differently ranked players close;
- *  - when n is not a multiple of 4 some players rest — the bench goes to
- *    whoever has sat out least, so rest keeps circulating.
+ * Court types are fixed at creation; a match is 1 vs 1 or 2 vs 2.
+ * The opening round uses club ratings, later rounds use standings. Rest rotates
+ * by bench history. Singles appearances rotate too; within the selected pool,
+ * neighbours in rank meet. Remaining players form ranked foursomes with the
+ * 1st + 4th against 2nd + 3rd pairing.
  *
  * Unlike Americano there is nothing to search for: a round is a deterministic
  * function of the table, so the schedule can only be built one round at a time,
@@ -20,6 +15,7 @@
 // Расширения указаны намеренно — см. комментарий к тому же импорту в americano.ts.
 import { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS } from './americano.ts';
 import { mulberry32, shuffle } from './rng.ts';
+import { activeCourts, validateCourts, type CourtConfig, type Team } from './courts.ts';
 
 export { MAX_COURTS, MAX_PLAYERS, MIN_PLAYERS };
 
@@ -31,13 +27,18 @@ export interface RoundMatch {
   /** 1-based */
   court: number;
   /** indices into whatever list the caller passed in */
-  team1: [number, number];
-  team2: [number, number];
+  team1: Team<number>;
+  team2: Team<number>;
+}
+
+function configOf(courts: number | CourtConfig): CourtConfig {
+  return typeof courts === 'number' ? { doubles: courts, singles: 0 } : courts;
 }
 
 /** Courts that can actually be filled — the rest would stand empty. */
-export function matchesPerRound(playerCount: number, courts: number): number {
-  return Math.min(courts, Math.floor(playerCount / 4));
+export function matchesPerRound(playerCount: number, courts: number | CourtConfig): number {
+  const active = activeCourts(playerCount, configOf(courts));
+  return active.doubles + active.singles;
 }
 
 export function validateRounds(rounds: number): number {
@@ -47,12 +48,12 @@ export function validateRounds(rounds: number): number {
   return rounds;
 }
 
-function assertField(playerCount: number, courts: number): void {
-  if (!Number.isInteger(playerCount) || playerCount < MIN_PLAYERS || playerCount > MAX_PLAYERS) {
-    throw new Error(`Число игроков должно быть от ${MIN_PLAYERS} до ${MAX_PLAYERS}`);
-  }
-  if (!Number.isInteger(courts) || courts < 1 || courts > MAX_COURTS) {
-    throw new Error(`Число кортов должно быть от 1 до ${MAX_COURTS}`);
+function assertField(playerCount: number, courts: number | CourtConfig): void {
+  const config = configOf(courts);
+  validateCourts(config);
+  const min = config.doubles > 0 ? MIN_PLAYERS : 2;
+  if (!Number.isInteger(playerCount) || playerCount < min || playerCount > MAX_PLAYERS) {
+    throw new Error(`Число игроков должно быть от ${min} до ${MAX_PLAYERS}`);
   }
 }
 
@@ -60,11 +61,20 @@ function assertField(playerCount: number, courts: number): void {
  * Split an ordered list of players into courts. `ordered[0]` is the strongest
  * player on court 1; everyone past the last full foursome is resting.
  */
-function seatByRank(ordered: number[], courtCount: number): RoundMatch[] {
+function seatByRank(ordered: number[], config: CourtConfig, active: CourtConfig, singlesPlayed: number[] = []): RoundMatch[] {
   const matches: RoundMatch[] = [];
-  for (let i = 0; i < courtCount; i++) {
-    const [a, b, c, d] = ordered.slice(i * 4, i * 4 + 4);
+  // Rotate singles appearances. Among equally eligible players, take neighbours
+  // in the standings, then pair that pool in rank order.
+  const eligible = [...ordered].sort((a, b) => (singlesPlayed[a] ?? 0) - (singlesPlayed[b] ?? 0));
+  const singleSet = new Set(eligible.slice(0, active.singles * 2));
+  const doubles = ordered.filter((p) => !singleSet.has(p));
+  const singles = ordered.filter((p) => singleSet.has(p));
+  for (let i = 0; i < active.doubles; i++) {
+    const [a, b, c, d] = doubles.slice(i * 4, i * 4 + 4);
     matches.push({ court: i + 1, team1: [a, d], team2: [b, c] });
+  }
+  for (let i = 0; i < active.singles; i++) {
+    matches.push({ court: config.doubles + i + 1, team1: [singles[i * 2]], team2: [singles[i * 2 + 1]] });
   }
   return matches;
 }
@@ -77,7 +87,7 @@ function seatByRank(ordered: number[], courtCount: number): RoundMatch[] {
  * everyone starts level, and entering players in strength order must not stack
  * the first court.
  */
-export function firstRound(ratings: number[], courts: number, seed?: number): RoundMatch[] {
+export function firstRound(ratings: number[], courts: number | CourtConfig, seed?: number): RoundMatch[] {
   const playerCount = ratings.length;
   assertField(playerCount, courts);
 
@@ -91,7 +101,9 @@ export function firstRound(ratings: number[], courts: number, seed?: number): Ro
   // рейтинг, — порядок внутри равных.
   seats.sort((a, b) => ratings[b] - ratings[a]);
 
-  return seatByRank(seats, matchesPerRound(playerCount, courts));
+  const config = configOf(courts);
+  const active = activeCourts(playerCount, config);
+  return seatByRank(seats.slice(0, active.doubles * 4 + active.singles * 2), config, active);
 }
 
 /**
@@ -101,12 +113,13 @@ export function firstRound(ratings: number[], courts: number, seed?: number): Ro
  * Returned indices refer to that same order, so the caller maps position in
  * the table back to a player.
  */
-export function nextRound(rested: number[], courts: number): RoundMatch[] {
+export function nextRound(rested: number[], courts: number | CourtConfig, singlesPlayed: number[] = []): RoundMatch[] {
   const playerCount = rested.length;
   assertField(playerCount, courts);
 
-  const courtCount = matchesPerRound(playerCount, courts);
-  const seats = courtCount * 4;
+  const config = configOf(courts);
+  const active = activeCourts(playerCount, config);
+  const seats = active.doubles * 4 + active.singles * 2;
 
   // Who sits out: the least-rested first, and among equals the lower half of
   // the table — a leader losing court time would distort the very ranking the
@@ -121,6 +134,8 @@ export function nextRound(rested: number[], courts: number): RoundMatch[] {
 
   return seatByRank(
     ranks.filter((rank) => !resting.has(rank)),
-    courtCount,
+    config,
+    active,
+    singlesPlayed,
   );
 }

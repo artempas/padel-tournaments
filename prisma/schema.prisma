@@ -348,6 +348,7 @@ model Tournament {
   name           String           @db.Text
   format         TournamentFormat @default(americano)
   courts         Int              @db.SmallInt
+  singlesCourts  Int              @default(0) @map("singles_courts") @db.SmallInt
   pointsPerMatch Int              @map("points_per_match") @db.SmallInt
 
   // Сколько раундов играть. Есть только у mexicano: там расписание строится
@@ -401,6 +402,7 @@ model Match {
 
   roundNo Int @map("round_no") @db.SmallInt
   courtNo Int @map("court_no") @db.SmallInt
+  teamSize Int @default(2) @map("team_size") @db.SmallInt
 
   // Копия tournaments.pointsPerMatch на момент создания. Делает инвариант
   // суммы проверяемым в базе (иначе он межтабличный) и защищает уже сыгранные
@@ -433,16 +435,10 @@ model Match {
 
 // Кто играл в матче.
 //
-// В паделе на корте всегда четверо: 2 на 2. Меняется способ разбивки на пары
-// (американо, мексикано, фиксированные пары), а не число мест — поэтому slot
-// ограничен двумя значениями, и этого хватает всем планируемым форматам.
-//
-// Что проверяет база:
-//   * игрок не встречается в матче дважды           — @@id
-//   * на стороне не больше двух                     — @@unique([matchId, side, slot]) + CHECK
-//   * участник из того же турнира, что и матч       — составной внешний ключ
-//   * игрок не занят на двух кортах в одном раунде  — @@unique([tournamentId, roundNo, ...])
-//   * ровно четверо, не трое                        — отложенный триггер в миграции
+// На стороне один или два игрока — согласно matches.team_size.
+// Отложенные триггеры проверяют заполненность обеих сторон и тип корта.
+// Уникальные ключи исключают дубли игрока в матче и в одном раунде;
+// составные внешние ключи удерживают участников в пределах турнира.
 model MatchParticipant {
   matchId String @map("match_id") @db.Uuid
   // Копия matches.roundNo: существует ради @@unique ниже, держится в согласии
