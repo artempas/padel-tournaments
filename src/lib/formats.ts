@@ -1,4 +1,5 @@
-import { totalMatchesFor } from './americano.ts';
+import { americanoSize } from './court-schedule.ts';
+import type { CourtConfig } from './courts.ts';
 import { matchesPerRound } from './mexicano.ts';
 import type { Match, PlayableFormat, TournamentFormat } from './types';
 
@@ -57,7 +58,7 @@ export function awaitsScore(match: Match): boolean {
 export function tournamentSize(
   format: TournamentFormat,
   playerCount: number,
-  courts: number,
+  courts: number | CourtConfig,
   roundsPlanned: number | null,
   builtMatches = 0,
 ): { matches: number; rounds: number } {
@@ -67,8 +68,8 @@ export function tournamentSize(
     return { matches: Math.max(perRound * roundsPlanned, builtMatches), rounds: roundsPlanned };
   }
 
-  const matches = Math.max(totalMatchesFor(playerCount), builtMatches);
-  return { matches, rounds: Math.ceil(matches / perRound) };
+  const size = americanoSize(playerCount, typeof courts === 'number' ? { doubles: courts, singles: 0 } : courts);
+  return { matches: Math.max(size.matches, builtMatches), rounds: Math.max(size.rounds, Math.ceil(builtMatches / perRound)) };
 }
 
 /**
@@ -82,7 +83,7 @@ export function tournamentSize(
 export function upcomingRounds(
   format: TournamentFormat,
   playerCount: number,
-  courts: number,
+  courts: number | CourtConfig,
   roundsPlanned: number | null,
   builtRounds: number,
 ): Array<{ round: number; matches: number }> {

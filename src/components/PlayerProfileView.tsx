@@ -225,7 +225,7 @@ export default function PlayerProfileView({
                             {match.scoreFor}:{match.scoreAgainst}
                           </span>
                           <span className="min-w-0 flex-1 text-xs text-muted">
-                            с {names[match.partnerId] ?? '—'} против{' '}
+                            {match.partnerId ? `с ${names[match.partnerId] ?? '—'} против ` : '1 на 1 против '}
                             {match.opponentIds.map((id) => names[id] ?? '—').join(' и ')}
                           </span>
                           <span

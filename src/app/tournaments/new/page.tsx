@@ -26,6 +26,7 @@ export default async function NewTournamentPage({
   // `?from=<id>` repeats an earlier tournament: same people, same settings.
   let players: string[] | undefined;
   let courts: number | undefined;
+  let singlesCourts: number | undefined;
   let pointsPerMatch: number | undefined;
   let format: PlayableFormat | undefined;
   let rounds: number | undefined;
@@ -36,6 +37,7 @@ export default async function NewTournamentPage({
       const source = await loadTournament(from, club.id);
       players = source.players.map((p) => p.name);
       courts = source.courts;
+      singlesCourts = source.singlesCourts ?? 0;
       pointsPerMatch = source.pointsPerMatch;
       // team_americano в базе возможен, но составить его пока нечем — такой
       // турнир повторяется американо, как и любой незнакомый формат.
@@ -54,6 +56,7 @@ export default async function NewTournamentPage({
       initialName={randomTournamentName()}
       initialPlayers={players}
       initialCourts={courts}
+      initialSinglesCourts={singlesCourts}
       initialPointsPerMatch={pointsPerMatch}
       initialFormat={format}
       initialRounds={rounds}

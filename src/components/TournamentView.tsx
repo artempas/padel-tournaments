@@ -6,8 +6,10 @@ import { useRouter } from 'next/navigation';
 import DynamicsChart from './DynamicsChart';
 import InsightCards from './InsightCards';
 import ScoreSheet from './ScoreSheet';
+import CourtDiagram from './CourtDiagram';
 import ShareResultsSheet from './ShareResultsSheet';
 import ThemeToggle from './ThemeToggle';
+import { courtConfig, courtLabel, courtNumbers } from '@/lib/courts';
 import { awaitsScore, formatLabel, tournamentSize, upcomingRounds } from '@/lib/formats';
 import { dynamicsInsights, roundHistory, tournamentInsights } from '@/lib/insights';
 import { MAX_ROUNDS, MIN_ROUNDS } from '@/lib/mexicano';
@@ -45,7 +47,7 @@ type Tab = 'matches' | 'table' | 'dynamics';
  */
 let failedDelete: { tournamentId: string; message: string } | null = null;
 
-function teamName(ids: [string, string], playersById: Map<string, Player>): string {
+function teamName(ids: readonly string[], playersById: Map<string, Player>): string {
   return ids.map((id) => playersById.get(id)?.name ?? '—').join(' / ');
 }
 
@@ -402,7 +404,7 @@ export default function TournamentView({
   const total = tournamentSize(
     tournament.format,
     tournament.players.length,
-    tournament.courts,
+    courtConfig(tournament),
     tournament.roundsPlanned,
     tournament.matches.length,
   ).matches;
@@ -448,7 +450,7 @@ export default function TournamentView({
         : upcomingRounds(
             tournament.format,
             tournament.players.length,
-            tournament.courts,
+            courtConfig(tournament),
             tournament.roundsPlanned,
             rounds.length > 0 ? rounds[rounds.length - 1][0] : 0,
           ),
@@ -457,6 +459,7 @@ export default function TournamentView({
       tournament.format,
       tournament.players.length,
       tournament.courts,
+      tournament.singlesCourts,
       tournament.roundsPlanned,
       rounds,
     ],
@@ -688,6 +691,7 @@ export default function TournamentView({
 
         <p className="mb-2 text-xs uppercase tracking-wide text-muted">
           {formatLabel(tournament.format)}
+          {` · ${courtLabel(courtConfig(tournament))}`}
           {tournament.roundsPlanned !== null &&
             ` · ${tournament.roundsPlanned} ${plural(tournament.roundsPlanned, 'раунд', 'раунда', 'раундов')}`}
         </p>
@@ -823,7 +827,7 @@ export default function TournamentView({
 
           {rounds.map(([round, matches]) => {
             const resting = restingInRound(tournament.players, tournament.matches, round);
-            const isCurrent = round === currentRound;
+            const isCurrent = !isFinished && round === currentRound;
 
             return (
               <section key={round}>
@@ -884,7 +888,7 @@ export default function TournamentView({
                         >
                           <div className="mb-2 flex items-center justify-between">
                             <span className="rounded-md bg-court/20 px-2 py-0.5 text-[11px] font-semibold text-court">
-                              Корт {match.court}
+                              Корт {match.court} · {match.team1.length} на {match.team2.length}
                             </span>
                             {unsent ? (
                               <span className="text-xs font-medium text-warn">не отправлено</span>
@@ -911,39 +915,43 @@ export default function TournamentView({
                             )}
                           </div>
 
-                          <div className="flex items-center gap-3">
-                            <span
-                              className={`min-w-0 flex-1 text-sm leading-snug ${
-                                team1Won ? 'font-bold text-accent' : ''
-                              }`}
-                            >
-                              {teamName(match.team1, playersById)}
-                            </span>
-                            <span className="flex shrink-0 flex-col items-center gap-0.5">
-                              <span className="text-base font-bold tabular-nums">
-                                {played ? `${match.score1} : ${match.score2}` : '–  :  –'}
+                          {isCurrent && !played && !match.skipped ? (
+                            <CourtDiagram match={match} playersById={playersById} />
+                          ) : (
+                            <div className="flex items-center gap-3">
+                              <span
+                                className={`min-w-0 flex-1 text-sm leading-snug ${
+                                  team1Won ? 'font-bold text-accent' : ''
+                                }`}
+                              >
+                                {teamName(match.team1, playersById)}
                               </span>
-                              {/* Острие смотрит на пару послабее по рейтингу;
-                                  чем больше символов, тем крупнее был перекос. */}
-                              {outlook && (
-                                <span
-                                  aria-hidden="true"
-                                  className={`rounded px-1.5 py-px text-[11px] font-bold leading-4 ${
-                                    OUTLOOK_TONE[outlook.level]
-                                  }`}
-                                >
-                                  {outlook.symbols}
+                              <span className="flex shrink-0 flex-col items-center gap-0.5">
+                                <span className="text-base font-bold tabular-nums">
+                                  {played ? `${match.score1} : ${match.score2}` : '–  :  –'}
                                 </span>
-                              )}
-                            </span>
-                            <span
-                              className={`min-w-0 flex-1 text-right text-sm leading-snug ${
-                                team2Won ? 'font-bold text-accent' : ''
-                              }`}
-                            >
-                              {teamName(match.team2, playersById)}
-                            </span>
-                          </div>
+                                {/* Острие смотрит на пару послабее по рейтингу;
+                                    чем больше символов, тем крупнее был перекос. */}
+                                {outlook && (
+                                  <span
+                                    aria-hidden="true"
+                                    className={`rounded px-1.5 py-px text-[11px] font-bold leading-4 ${
+                                      OUTLOOK_TONE[outlook.level]
+                                    }`}
+                                  >
+                                    {outlook.symbols}
+                                  </span>
+                                )}
+                              </span>
+                              <span
+                                className={`min-w-0 flex-1 text-right text-sm leading-snug ${
+                                  team2Won ? 'font-bold text-accent' : ''
+                                }`}
+                              >
+                                {teamName(match.team2, playersById)}
+                              </span>
+                            </div>
+                          )}
 
                           {/* Рейтинг появляется вместе со счётом и стоит под
                               составами, столбец в столбец с ними. Словами то
@@ -992,19 +1000,19 @@ export default function TournamentView({
             );
           })}
 
-          {upcoming.map(({ round, matches }, index) => (
+          {upcoming.map(({ round }, index) => (
             <section key={`upcoming-${round}`}>
               <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-muted">
                 Раунд {round}
               </h2>
 
               <ul className="flex flex-col gap-2">
-                {Array.from({ length: matches }, (_, i) => i + 1).map((court) => (
+                {courtNumbers(tournament.players.length, courtConfig(tournament)).map((court) => (
                   <li key={court}>
                     <div className="card p-3">
                       <div className="mb-2 flex items-center gap-2">
                         <span className="rounded-md bg-court/20 px-2 py-0.5 text-[11px] font-semibold text-court">
-                          Корт {court}
+                          Корт {court} · {court <= courtConfig(tournament).doubles ? '2 на 2' : '1 на 1'}
                         </span>
                         <span className="sr-only">составы будут известны позже</span>
                       </div>

@@ -1,13 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, parseUuid } from './api';
-import {
-  extendAmericano,
-  generateAmericano,
-  MAX_COURTS,
-  MAX_PLAYERS,
-  MIN_PLAYERS,
-  type PlayedMatch,
-} from './americano';
+import { MAX_PLAYERS } from './americano';
+import { courtConfig, validateCourts, type Team } from './courts';
+import { generateCourtAmericano, extendCourtAmericano, type CourtHistory } from './court-schedule';
 import { awaitsScore } from './formats';
 import { publishTournament } from './live';
 import {
@@ -38,6 +33,8 @@ export interface CreateTournamentInput {
   name?: string;
   players?: unknown;
   courts?: unknown;
+  doublesCourts?: unknown;
+  singlesCourts?: unknown;
   pointsPerMatch?: unknown;
   format?: unknown;
   rounds?: unknown;
@@ -47,6 +44,7 @@ interface ValidatedInput {
   name: string;
   players: string[];
   courts: number;
+  singlesCourts: number;
   pointsPerMatch: number;
   format: PlayableFormat;
   /** Задана только у mexicano — см. CHECK tournaments_rounds_planned_format. */
@@ -61,9 +59,22 @@ export function validateCreateInput(input: CreateTournamentInput): ValidatedInpu
 
   if (!Array.isArray(input.players)) throw new ApiError('Список игроков обязателен');
   const players = input.players.map((p) => String(p ?? '').trim()).filter(Boolean);
+  const count = (value: unknown): number =>
+    typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')
+      ? Number(value) : NaN;
+  const singlesCourts = input.singlesCourts === undefined ? 0 : count(input.singlesCourts);
+  const doublesCourts = input.doublesCourts === undefined
+    ? count(input.courts) - singlesCourts : count(input.doublesCourts);
+  try {
+    validateCourts({ doubles: doublesCourts, singles: singlesCourts });
+  } catch (error) {
+    throw new ApiError((error as Error).message);
+  }
+  const courts = doublesCourts + singlesCourts;
+  const minPlayers = doublesCourts > 0 ? 4 : 2;
 
-  if (players.length < MIN_PLAYERS || players.length > MAX_PLAYERS) {
-    throw new ApiError(`Нужно от ${MIN_PLAYERS} до ${MAX_PLAYERS} игроков`);
+  if (players.length < minPlayers || players.length > MAX_PLAYERS) {
+    throw new ApiError(`Нужно от ${minPlayers} до ${MAX_PLAYERS} игроков`);
   }
   if (players.some((p) => p.length > 40)) {
     throw new ApiError('Имя игрока не длиннее 40 символов');
@@ -73,11 +84,6 @@ export function validateCreateInput(input: CreateTournamentInput): ValidatedInpu
   // которые база считает одним человеком, попали бы на два места в турнире.
   const seen = new Set(players.map(normalizeKey));
   if (seen.size !== players.length) throw new ApiError('Имена игроков должны быть уникальными');
-
-  const courts = Number(input.courts);
-  if (!Number.isInteger(courts) || courts < 1 || courts > MAX_COURTS) {
-    throw new ApiError(`Число кортов должно быть от 1 до ${MAX_COURTS}`);
-  }
 
   const pointsPerMatch = input.pointsPerMatch === undefined ? 16 : Number(input.pointsPerMatch);
   if (!Number.isInteger(pointsPerMatch) || pointsPerMatch < 1 || pointsPerMatch > 200) {
@@ -99,7 +105,7 @@ export function validateCreateInput(input: CreateTournamentInput): ValidatedInpu
     }
   }
 
-  return { name, players, courts, pointsPerMatch, format, rounds };
+  return { name, players, courts, singlesCourts, pointsPerMatch, format, rounds };
 }
 
 /**
@@ -123,8 +129,8 @@ function lifecycle(completedAt: Date | null, closedAt: Date | null) {
 interface PlannedMatch {
   round: number;
   court: number;
-  team1: [number, number];
-  team2: [number, number];
+  team1: Team<number>;
+  team2: Team<number>;
 }
 
 function planRound(round: number, matches: RoundMatch[]): PlannedMatch[] {
@@ -135,7 +141,7 @@ function planRound(round: number, matches: RoundMatch[]): PlannedMatch[] {
  * Пишет матчи вместе с участниками.
  *
  * id матчей генерируются здесь, чтобы участников можно было вставить одним
- * createMany, не дожидаясь RETURNING. Триггер «ровно четверо» отложен до
+ * createMany, не дожидаясь RETURNING. Триггер заполненности сторон отложен до
  * COMMIT, поэтому промежуточное состояние его не смущает.
  */
 async function insertMatches(
@@ -150,6 +156,7 @@ async function insertMatches(
     tournamentId,
     roundNo: m.round,
     courtNo: m.court,
+    teamSize: m.team1.length,
     pointsSum: pointsPerMatch,
   }));
 
@@ -159,10 +166,8 @@ async function insertMatches(
     data: planned.flatMap((m, i) => {
       const shared = { matchId: rows[i].id, tournamentId, roundNo: m.round };
       return [
-        { ...shared, tournamentPlayerId: playerIdAt(m.team1[0]), side: 'a' as const, slot: 1 },
-        { ...shared, tournamentPlayerId: playerIdAt(m.team1[1]), side: 'a' as const, slot: 2 },
-        { ...shared, tournamentPlayerId: playerIdAt(m.team2[0]), side: 'b' as const, slot: 1 },
-        { ...shared, tournamentPlayerId: playerIdAt(m.team2[1]), side: 'b' as const, slot: 2 },
+        ...m.team1.map((p, slot) => ({ ...shared, tournamentPlayerId: playerIdAt(p), side: 'a' as const, slot: slot + 1 })),
+        ...m.team2.map((p, slot) => ({ ...shared, tournamentPlayerId: playerIdAt(p), side: 'b' as const, slot: slot + 1 })),
       ];
     }),
   });
@@ -173,13 +178,14 @@ export async function createTournament(
   createdById: string,
   input: CreateTournamentInput,
 ): Promise<string> {
-  const { name, players, courts, pointsPerMatch, format, rounds } = validateCreateInput(input);
+  const { name, players, courts, singlesCourts, pointsPerMatch, format, rounds } = validateCreateInput(input);
+  const config = courtConfig({ courts, singlesCourts });
 
   // У американо расписание известно целиком заранее. У mexicano заранее
   // известен только первый раунд — остальные достраиваются по таблице, по
   // мере того как приходят результаты (см. extendMexicano).
   const schedule =
-    format === 'americano' ? generateAmericano(players.length, courts).matches : null;
+    format === 'americano' ? generateCourtAmericano(players.length, config) : null;
 
   // Первый раунд мексикано сеется по клубному рейтингу, так что он нужен до
   // сборки расписания. Читается вне транзакции: у тех, кого клуб ещё не видел,
@@ -202,7 +208,7 @@ export async function createTournament(
             (playerName) =>
               ratings?.get(people.get(normalizeKey(playerName))!)?.rating ?? START_RATING,
           ),
-          courts,
+          config,
         ),
       );
 
@@ -214,6 +220,7 @@ export async function createTournament(
         createdById,
         name,
         courts,
+        singlesCourts,
         pointsPerMatch,
         format,
         roundsPlanned: rounds,
@@ -239,6 +246,7 @@ interface OverviewRow {
   id: string;
   name: string;
   courts: number;
+  singles_courts: number;
   format: TournamentFormat;
   rounds_planned: number | null;
   points_per_match: number;
@@ -256,7 +264,7 @@ interface OverviewRow {
  */
 export async function listTournaments(clubId: string): Promise<TournamentSummary[]> {
   const rows = await prisma.$queryRaw<OverviewRow[]>`
-    SELECT id, name, courts, format, rounds_planned, points_per_match,
+    SELECT id, name, courts, singles_courts, format, rounds_planned, points_per_match,
            completed_at, closed_at, created_at,
            player_count, match_count, played_count
       FROM tournament_overview
@@ -268,6 +276,7 @@ export async function listTournaments(clubId: string): Promise<TournamentSummary
     id: r.id,
     name: r.name,
     courts: r.courts,
+    singlesCourts: r.singles_courts,
     format: r.format,
     roundsPlanned: r.rounds_planned,
     pointsPerMatch: r.points_per_match,
@@ -309,17 +318,20 @@ function readBoard(t: BoardRows): { players: Player[]; matches: Match[] } {
   }));
 
   const matches: Match[] = t.matches.map((m) => {
-    // Участники приходят четырьмя строками; наружу отдаём прежнюю форму, чтобы
-    // клиенту не пришлось знать про раскладку по side/slot.
-    const seat = (side: 'a' | 'b', slot: number): string =>
-      m.participants.find((p) => p.side === side && p.slot === slot)!.tournamentPlayerId;
+    // Строки участников собираются в стороны с сохранением порядка мест.
+    const team = (side: 'a' | 'b'): Team => {
+      const ids = m.participants.filter((p) => p.side === side).sort((a, b) => a.slot - b.slot).map((p) => p.tournamentPlayerId);
+      if (ids.length === 1) return [ids[0]];
+      if (ids.length === 2) return [ids[0], ids[1]];
+      throw new Error('Некорректный состав матча');
+    };
 
     return {
       id: m.id,
       round: m.roundNo,
       court: m.courtNo,
-      team1: [seat('a', 1), seat('a', 2)],
-      team2: [seat('b', 1), seat('b', 2)],
+      team1: team('a'),
+      team2: team('b'),
       score1: m.scoreA,
       score2: m.scoreB,
       skipped: m.skippedAt !== null,
@@ -338,6 +350,7 @@ export async function loadTournament(id: string, clubId: string): Promise<Tourna
       id: true,
       name: true,
       courts: true,
+      singlesCourts: true,
       format: true,
       roundsPlanned: true,
       pointsPerMatch: true,
@@ -363,6 +376,7 @@ export async function loadTournament(id: string, clubId: string): Promise<Tourna
     id: t.id,
     name: t.name,
     courts: t.courts,
+    singlesCourts: t.singlesCourts,
     format: t.format,
     roundsPlanned: t.roundsPlanned,
     pointsPerMatch: t.pointsPerMatch,
@@ -612,7 +626,7 @@ async function extendMexicano(
   // базе, и тащить его сюда на каждый внесённый счёт незачем.
   const t = await tx.tournament.findUnique({
     where: { id: tournamentId },
-    select: { format: true, courts: true, pointsPerMatch: true, roundsPlanned: true },
+    select: { format: true, courts: true, singlesCourts: true, pointsPerMatch: true, roundsPlanned: true },
   });
 
   if (!t || t.format !== 'mexicano' || t.roundsPlanned === null) return;
@@ -637,7 +651,8 @@ async function extendMexicano(
   const rested = restCounts(players, matches);
   const round = nextRound(
     standings.map((row) => rested.get(row.playerId) ?? 0),
-    t.courts,
+    courtConfig(t),
+    standings.map((row) => matches.filter((m) => m.team1.length === 1 && [...m.team1, ...m.team2].includes(row.playerId)).length),
   );
 
   await insertMatches(
@@ -709,6 +724,7 @@ export async function extendTournament(
       select: {
         format: true,
         courts: true,
+        singlesCourts: true,
         pointsPerMatch: true,
         roundsPlanned: true,
         ...BOARD_SELECT,
@@ -731,19 +747,17 @@ export async function extendTournament(
       // Генератор считает игроков номерами; players отсортированы по seat,
       // поэтому место в списке — это и есть индекс, которым он их знает.
       const indexOf = new Map(players.map((p, index) => [p.id, index]));
-      const asIndices = (ids: [string, string]): [number, number] => [
-        indexOf.get(ids[0])!,
-        indexOf.get(ids[1])!,
-      ];
+      const asIndices = (ids: Team): Team<number> => ids.length === 1
+        ? [indexOf.get(ids[0])!] : [indexOf.get(ids[0])!, indexOf.get(ids[1])!];
 
-      const history: PlayedMatch[] = matches.map((m) => ({
+      const history: CourtHistory[] = matches.map((m) => ({
         round: m.round,
         team1: asIndices(m.team1),
         team2: asIndices(m.team2),
       }));
       const lastRound = matches.reduce((max, m) => Math.max(max, m.round), 0);
 
-      const added = extendAmericano(players.length, t.courts, extraRounds, history);
+      const added = extendCourtAmericano(players.length, courtConfig(t), extraRounds, history);
       await insertMatches(
         tx,
         tid,

@@ -1,3 +1,4 @@
+import { courtConfig, courtLabel } from '@/lib/courts';
 import Link from 'next/link';
 import ClubSwitcher from '@/components/ClubSwitcher';
 import LogoutButton from '@/components/LogoutButton';
@@ -96,7 +97,7 @@ export default async function TournamentsPage() {
             const total = tournamentSize(
               t.format,
               t.playerCount,
-              t.courts,
+              courtConfig(t),
               t.roundsPlanned,
               t.matchCount,
             ).matches;
@@ -122,8 +123,7 @@ export default async function TournamentsPage() {
                   </div>
 
                   <p className="mt-1 text-sm text-muted">
-                    {formatLabel(t.format)} · {t.playerCount} игроков · {t.courts}{' '}
-                    {t.courts === 1 ? 'корт' : t.courts < 5 ? 'корта' : 'кортов'} ·{' '}
+                    {formatLabel(t.format)} · {t.playerCount} игроков · {courtLabel(courtConfig(t))} ·{' '}
                     {dateFormat.format(new Date(t.createdAt))}
                   </p>
 

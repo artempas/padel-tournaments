@@ -150,7 +150,7 @@ async function ratedHistory(clubId: string, before?: HistoryCutoff): Promise<Pla
 }
 
 /**
- * Четыре строки участников обратно в один матч. Порядок матчей — тот, в котором
+ * Строки участников обратно в один матч. Порядок матчей — тот, в котором
  * их встретил запрос: Map помнит порядок вставки, и сортировка доезжает сюда
  * нетронутой.
  */
@@ -187,12 +187,11 @@ function toMatches(rows: HistoryRow[]): PlayedMatch[] {
 
   return (
     [...byMatch.values()]
-      // «В матче ровно четверо» держит отложенный триггер в базе, так что
-      // неполной четвёрке взяться неоткуда; проверка стоит ради типа пары.
-      .filter((m) => m.a.length === 2 && m.b.length === 2)
+      // Обе стороны заполнены по типу корта: один или два участника.
+      .filter((m) => (m.a.length === 1 || m.a.length === 2) && m.a.length === m.b.length)
       .map((m): PlayedMatch => ({
-        teamA: [m.a[0], m.a[1]],
-        teamB: [m.b[0], m.b[1]],
+        teamA: m.a,
+        teamB: m.b,
         scoreA: m.scoreA,
         scoreB: m.scoreB,
         tournamentId: m.tournamentId,

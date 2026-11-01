@@ -131,7 +131,7 @@ try {
 
   // Регистрация заканчивается выбором имени, и кто именно регистрируется —
   // знает сервер, а не запрос. Без начатой регистрации имя ничего не создаёт.
-  const orphan = await fetch(`${BASE}/api/auth/yandex/signup`, {
+  const orphan = await fetch(`${BASE}/api/auth/signup`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ name: 'Никто' }),

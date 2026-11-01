@@ -1,3 +1,4 @@
+import type { Team } from './courts';
 import type { Rating } from './rating';
 
 export interface Player {
@@ -10,8 +11,8 @@ export interface Match {
   id: string;
   round: number;
   court: number;
-  team1: [string, string];
-  team2: [string, string];
+  team1: Team;
+  team2: Team;
   score1: number | null;
   score2: number | null;
   /**
@@ -32,7 +33,9 @@ export type PlayableFormat = Extract<TournamentFormat, 'americano' | 'mexicano'>
 export interface Tournament {
   id: string;
   name: string;
+  /** Total physical courts; singles occupy the last court numbers. */
   courts: number;
+  singlesCourts?: number;
   format: TournamentFormat;
   /** Длина турнира в раундах — только у mexicano, у остальных null. */
   roundsPlanned: number | null;

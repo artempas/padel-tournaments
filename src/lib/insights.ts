@@ -31,7 +31,7 @@ export interface Insight {
 type PlayedMatch = Match & { score1: number; score2: number };
 
 interface Side {
-  ids: [string, string];
+  ids: [string] | [string, string];
   got: number;
   lost: number;
 }
@@ -84,7 +84,7 @@ function pairKey(ids: [string, string]): string {
   return [...ids].sort().join('|');
 }
 
-function teamLabel(ids: [string, string], names: Map<string, string>): string {
+function teamLabel(ids: readonly string[], names: Map<string, string>): string {
   return ids.map((id) => names.get(id) ?? '—').join(' / ');
 }
 
@@ -124,7 +124,8 @@ export function tournamentInsights(players: Player[], matches: Match[]): Insight
   if (ms.length < MIN_MATCHES_FOR_FACTS) return [];
 
   const names = new Map(players.map((p) => [p.id, p.name]));
-  const tallies = tallyPlayers(ms);
+  const doubles = ms.filter((m) => m.team1.length === 2);
+  const tallies = tallyPlayers(doubles);
   const avgTotal = averageTotal(ms);
   const share = (id: string): number => {
     const tally = tallies.get(id);
@@ -137,6 +138,7 @@ export function tournamentInsights(players: Player[], matches: Match[]): Insight
   for (const m of ms) {
     const total = totalOf(m);
     for (const side of sidesOf(m)) {
+      if (side.ids.length !== 2) continue;
       const key = pairKey(side.ids);
       const pair = pairs.get(key) ?? { ids: side.ids, matches: 0, points: 0, of: 0, wins: 0 };
       pair.matches++;
@@ -152,8 +154,8 @@ export function tournamentInsights(players: Player[], matches: Match[]): Insight
   }
 
   const bestPair = findBestPair(pairs, names);
-  const chemistry = findChemistry(pairs, tallies, names, avgTotal, bestPair?.key);
-  const carried = findCarried(tallies, partners, names, share, avgTotal);
+  const chemistry = findChemistry(pairs, tallies, names, averageTotal(doubles), bestPair?.key);
+  const carried = findCarried(tallies, partners, names, share, averageTotal(doubles));
   const closest = findClosestMatch(ms, names, avgTotal);
   const blowout = findBlowout(ms, names, avgTotal);
   const tight = findTightTournament(ms, avgTotal);

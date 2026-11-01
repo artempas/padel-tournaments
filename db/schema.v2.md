@@ -20,7 +20,7 @@ erDiagram
     tournaments ||--o{ tournament_players : "состав"
     tournaments ||--o{ matches            : "расписание"
 
-    matches            ||--|{ match_participants : "ровно 4 строки"
+    matches            ||--|{ match_participants : "2 или 4 строки"
     tournament_players ||--o{ match_participants : "участие"
 
     users {
@@ -106,7 +106,8 @@ erDiagram
         uuid     created_by_id    FK "nullable — кто завёл"
         text     name
         enum     format           "americano | mexicano | team_americano"
-        smallint courts           "1..16"
+        smallint courts           "1..16, суммарно"
+        smallint singles_courts   "0..courts, последние номера"
         smallint points_per_match "1..200"
         timestamptz completed_at  "внесён счёт последнего матча"
         timestamptz closed_at     "завершён досрочно"
@@ -125,6 +126,7 @@ erDiagram
         uuid     id            PK
         uuid     tournament_id FK
         smallint round_no      UK "уникально с court_no"
+        smallint team_size      "1 или 2"
         smallint court_no      UK
         smallint points_sum    "копия нормы турнира"
         smallint score_a       "nullable"
@@ -154,7 +156,7 @@ flowchart TB
         B["UNIQUE<br/>(match_id, side, slot)<br/>+ slot ∈ 1,2"] --> B1["на стороне<br/>не больше двух"]
         C["FK (tournament_player_id,<br/>tournament_id)"] --> C1["участник — из турнира<br/>этого матча"]
         D["UNIQUE (tournament_id,<br/>round_no, tournament_player_id)"] --> D1["игрок не занят на двух<br/>кортах в одном раунде"]
-        E["CONSTRAINT TRIGGER<br/>DEFERRABLE"] --> E1["ровно четверо,<br/>не трое"]
+        E["CONSTRAINT TRIGGER<br/>DEFERRABLE"] --> E1["по 1 или 2 на стороне,<br/>согласно типу корта"]
     end
 
     subgraph cl["клубы"]
